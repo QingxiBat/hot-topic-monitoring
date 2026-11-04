@@ -321,12 +321,7 @@ a {
   margin: clamp(18px, 3vw, 30px) clamp(18px, 4vw, 56px) 0;
   padding: 0 0 10px;
   border-bottom: 3px double var(--ink);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.scope-nav::-webkit-scrollbar {
-  display: none;
+  overflow: visible;
 }
 
 .nav-label {
@@ -344,6 +339,17 @@ a {
   gap: 8px;
   flex: 1;
   min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  padding: 4px 2px;
+  margin: -4px -2px;
+}
+
+.scope-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .scope-tab {
@@ -371,8 +377,11 @@ a {
 
 .scope-add {
   flex: none;
+  position: relative;
+  z-index: 1;
+  margin-left: 4px;
   border: 1px dashed var(--line-strong);
-  background: none;
+  background: var(--paper);
   padding: 5px 12px;
   font-family: var(--sans);
   font-size: 12px;
