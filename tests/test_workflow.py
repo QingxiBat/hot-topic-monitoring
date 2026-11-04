@@ -1,7 +1,7 @@
 import asyncio
 
 from app import db
-from app.pipeline import run_collect, run_keyword_check
+from app.pipeline import ingest_scope_items, run_collect, run_keyword_check
 from app.sources import RawItem
 
 
@@ -61,8 +61,12 @@ def test_run_collect_persists_topics(temp_db, monkeypatch):
     async def fake_feed_batch(feeds, limit, freshness):
         return ([], [])
 
+    async def fake_custom_sources(settings):
+        return ([], [])
+
     monkeypatch.setattr(pipeline, "fetch_scope_sources", fake_scope_sources)
     monkeypatch.setattr(pipeline, "fetch_feed_batch", fake_feed_batch)
+    monkeypatch.setattr(pipeline, "fetch_custom_sources", fake_custom_sources)
     monkeypatch.setattr(pipeline, "OllamaClient", FakeOllama)
 
     result = asyncio.run(run_collect("test"))
@@ -72,6 +76,30 @@ def test_run_collect_persists_topics(temp_db, monkeypatch):
     assert len(topics) == 1
     assert topics[0]["scope_names"] == ["AI 编程"]
     assert topics[0]["verdict"] == "verified"
+
+
+def test_ingest_scope_items_preserves_source_metadata(temp_db, monkeypatch):
+    import app.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllama)
+    item = RawItem(
+        title="AI Agent 实战视频",
+        url="https://www.bilibili.com/video/BVtest",
+        summary="社区视频",
+        source="B站科技区排行",
+        source_domain="bilibili.com",
+        published_at=db.now_iso(),
+        source_tier="community",
+        content_kind="video",
+    )
+    stats = asyncio.run(
+        ingest_scope_items([item], db.list_scopes(enabled_only=True), db.get_settings(), "test")
+    )
+    assert stats["inserted"] == 1
+    topic = db.list_topics(include_keyword_only=True)[0]
+    assert topic["source_tier"] == "community"
+    assert topic["content_kind"] == "video"
+    assert topic["verdict"] == "unverified"
 
 
 def test_run_keyword_check_creates_alert(temp_db, monkeypatch):

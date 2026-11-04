@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlencode, urlunparse
 import feedparser
 import httpx
 
-from .config import USER_AGENT
+from .config import CUSTOM_SOURCES, USER_AGENT
 from .db import now_utc
 
 TRACKING_PARAMS = {
@@ -20,6 +20,13 @@ TRACKING_PARAMS = {
 
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
+AI_HINT_RE = re.compile(
+    r"(?:\bai\b|artificial intelligence|machine learning|deep learning|llm|gpt|claude|gemini|qwen|deepseek|"
+    r"agent|mcp|copilot|cursor|ollama|hugging face|huggingface|transformer|diffusion|multimodal|openai|"
+    r"anthropic|nvidia|gpu|大模型|人工智能|机器学习|深度学习|智能体|模型|算法|编程|代码|开发者|开源|芯片|算力|"
+    r"多模态|机器人|自动驾驶|生成式|推理)",
+    re.I,
+)
 
 
 @dataclass
@@ -32,6 +39,8 @@ class RawItem:
     published_at: str | None = None
     origin: str = "web"
     points: int = 0
+    source_tier: str = "media"
+    content_kind: str = "news"
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -44,7 +53,13 @@ class RawItem:
             "published_at": self.published_at,
             "origin": self.origin,
             "points": self.points,
+            "source_tier": self.source_tier,
+            "content_kind": self.content_kind,
         }
+
+
+def matches_ai_hint(text: str) -> bool:
+    return bool(AI_HINT_RE.search(text or ""))
 
 
 def clean_html(value: str | None, limit: int = 600) -> str:
@@ -182,8 +197,15 @@ def _is_fresh(published_at: str | None, hours: int) -> bool:
     return parsed >= now_utc() - timedelta(hours=hours)
 
 
-async def _get(url: str, timeout: float = 20.0) -> httpx.Response:
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/xml, text/xml, */*"}
+async def _get(
+    url: str, timeout: float = 20.0, extra_headers: dict[str, str] | None = None
+) -> httpx.Response:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/rss+xml, application/xml, text/xml, application/json, */*",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -199,6 +221,9 @@ def _parse_entries(
     freshness_hours: int = 168,
     origin: str = "rss",
     decode_link=None,
+    source_tier: str = "media",
+    content_kind: str = "news",
+    filter_ai: bool = False,
 ) -> list[RawItem]:
     feed = feedparser.parse(content)
     items: list[RawItem] = []
@@ -222,6 +247,8 @@ def _parse_entries(
             entry_source_href = ""
         domain = source_domain or domain_of(entry_source_href) or domain_of(link) or default_domain
         summary = clean_html(entry.get("summary") or entry.get("description"), 600)
+        if filter_ai and not matches_ai_hint(f"{title} {summary}"):
+            continue
         items.append(
             RawItem(
                 title=title,
@@ -231,6 +258,8 @@ def _parse_entries(
                 source_domain=domain,
                 published_at=published,
                 origin=origin,
+                source_tier=source_tier,
+                content_kind=content_kind,
             )
         )
         if len(items) >= limit:
@@ -256,6 +285,8 @@ async def fetch_google_news(
         limit=limit,
         freshness_hours=freshness_hours,
         origin="google",
+        source_tier="media",
+        content_kind="news",
     )
 
 
@@ -277,6 +308,8 @@ async def fetch_bing_news(query: str, limit: int = 6, freshness_hours: int = 168
                 freshness_hours=freshness_hours,
                 origin="bing",
                 decode_link=decode_bing_link,
+                source_tier="media",
+                content_kind="news",
             )
             if items:
                 return items
@@ -317,6 +350,8 @@ async def fetch_hn(query: str, limit: int = 8, freshness_hours: int = 168) -> li
                 published_at=published,
                 origin="hn",
                 points=points,
+                source_tier="community",
+                content_kind="discussion",
             )
         )
         if len(items) >= limit:
@@ -330,9 +365,12 @@ async def fetch_feed(feed: dict[str, Any], limit: int = 6, freshness_hours: int 
         response.content,
         feed["name"],
         default_domain=domain_of(feed["url"]),
-        limit=limit,
+        limit=int(feed.get("max_items") or limit),
         freshness_hours=freshness_hours,
         origin="feed",
+        source_tier=feed.get("tier", "media"),
+        content_kind=feed.get("content_kind", "news"),
+        filter_ai=bool(feed.get("filter_ai")),
     )
 
 
@@ -349,6 +387,199 @@ async def fetch_feed_batch(
         else:
             items.extend(result)
     return items, errors
+
+
+async def fetch_custom_sources(settings: dict[str, Any]) -> tuple[list[RawItem], list[str]]:
+    adapter_map = {
+        "bilibili_ranking": fetch_bilibili_ranking,
+        "juejin_hot": fetch_juejin_hot,
+        "v2ex_hot": fetch_v2ex_hot,
+        "hf_daily_papers": fetch_hf_daily_papers,
+    }
+    freshness = int(settings.get("freshness_hours", 168))
+    tasks = []
+    labels = []
+    for source in CUSTOM_SOURCES:
+        if not source.get("enabled", True):
+            continue
+        adapter = adapter_map.get(source.get("adapter"))
+        if not adapter:
+            continue
+        tasks.append(adapter(int(source.get("limit", 10)), freshness))
+        labels.append(source["name"])
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    items: list[RawItem] = []
+    errors: list[str] = []
+    for label, result in zip(labels, results):
+        if isinstance(result, Exception):
+            errors.append(f"{label}: {result}")
+        else:
+            items.extend(result)
+    return items, errors
+
+
+def _timestamp_iso(value: Any) -> str | None:
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+async def fetch_bilibili_ranking(limit: int = 10, freshness_hours: int = 168) -> list[RawItem]:
+    urls = [
+        "https://api.bilibili.com/x/web-interface/ranking/v2?rid=188&type=all",
+        "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all",
+        "https://api.bilibili.com/x/web-interface/popular?ps=30&pn=1",
+    ]
+    found: dict[str, RawItem] = {}
+    for url in urls:
+        try:
+            response = await _get(
+                url,
+                extra_headers={"Accept": "application/json", "Referer": "https://www.bilibili.com/"},
+            )
+            payload = response.json()
+        except Exception:
+            continue
+        for entry in payload.get("data", {}).get("list", []):
+            title = clean_html(entry.get("title"), 300)
+            desc = clean_html(entry.get("desc"), 400)
+            bvid = entry.get("bvid")
+            if not title or not bvid or bvid in found:
+                continue
+            if not matches_ai_hint(f"{title} {desc}"):
+                continue
+            published = _timestamp_iso(entry.get("pubdate"))
+            if not _is_fresh(published, freshness_hours):
+                continue
+            stat = entry.get("stat") or {}
+            owner = (entry.get("owner") or {}).get("name") or ""
+            summary = (
+                f"{desc} | 播放 {stat.get('view', 0)} · 点赞 {stat.get('like', 0)} · UP {owner}"
+            ).strip(" |")
+            found[bvid] = RawItem(
+                title=title,
+                url=f"https://www.bilibili.com/video/{bvid}",
+                summary=summary,
+                source="B站科技区排行",
+                source_domain="bilibili.com",
+                published_at=published,
+                origin="bilibili",
+                points=0,
+                source_tier="community",
+                content_kind="video",
+            )
+            if len(found) >= limit:
+                return list(found.values())
+    return list(found.values())
+
+
+async def fetch_juejin_hot(limit: int = 10, freshness_hours: int = 168) -> list[RawItem]:
+    url = (
+        "https://api.juejin.cn/content_api/v1/content/article_rank"
+        "?category_id=1&type=hot&cursor=0&limit=30"
+    )
+    response = await _get(url, extra_headers={"Accept": "application/json"})
+    payload = response.json()
+    items: list[RawItem] = []
+    for entry in payload.get("data", []):
+        content = entry.get("content") or {}
+        title = clean_html(content.get("title"), 300)
+        brief = clean_html(content.get("brief"), 400)
+        content_id = content.get("content_id")
+        if not title or not content_id:
+            continue
+        if not matches_ai_hint(f"{title} {brief}"):
+            continue
+        counter = entry.get("content_counter") or {}
+        summary = f"{brief} | 阅读 {counter.get('view', 0)} · 点赞 {counter.get('like', 0)}".strip(" |")
+        items.append(
+            RawItem(
+                title=title,
+                url=f"https://juejin.cn/post/{content_id}",
+                summary=summary,
+                source="掘金热榜",
+                source_domain="juejin.cn",
+                published_at=_timestamp_iso(content.get("ctime")),
+                origin="juejin",
+                source_tier="community",
+                content_kind="discussion",
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+async def fetch_v2ex_hot(limit: int = 10, freshness_hours: int = 168) -> list[RawItem]:
+    url = "https://www.v2ex.com/api/topics/hot.json"
+    response = await _get(url, extra_headers={"Accept": "application/json"})
+    payload = response.json()
+    items: list[RawItem] = []
+    for entry in payload:
+        title = clean_html(entry.get("title"), 300)
+        link = entry.get("url") or ""
+        content = clean_html(entry.get("content"), 400)
+        if not title or not link:
+            continue
+        if not matches_ai_hint(f"{title} {content}"):
+            continue
+        node = (entry.get("node") or {}).get("title") or ""
+        summary = f"{content} | {node} · 回复 {entry.get('replies', 0)}".strip(" |")
+        items.append(
+            RawItem(
+                title=title,
+                url=canonicalize_url(link),
+                summary=summary,
+                source="V2EX 热榜",
+                source_domain="v2ex.com",
+                published_at=_timestamp_iso(entry.get("created")),
+                origin="v2ex",
+                source_tier="community",
+                content_kind="discussion",
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+async def fetch_hf_daily_papers(limit: int = 5, freshness_hours: int = 168) -> list[RawItem]:
+    url = f"https://huggingface.co/api/daily_papers?limit={max(limit, 10)}"
+    response = await _get(url, extra_headers={"Accept": "application/json"})
+    payload = response.json()
+    items: list[RawItem] = []
+    for entry in payload:
+        paper = entry.get("paper") or {}
+        paper_id = paper.get("id")
+        title = clean_html(entry.get("title") or paper.get("title"), 300)
+        if not paper_id or not title:
+            continue
+        summary = clean_html(
+            entry.get("summary") or paper.get("ai_summary") or paper.get("summary"), 600
+        )
+        authors = ", ".join(
+            str(author.get("name") or "") for author in (paper.get("authors") or [])[:4]
+        )
+        items.append(
+            RawItem(
+                title=title,
+                url=f"https://huggingface.co/papers/{paper_id}",
+                summary=f"{summary} | 作者：{authors}".strip(" |"),
+                source="HF Daily Papers",
+                source_domain="huggingface.co",
+                published_at=entry.get("publishedAt") or paper.get("publishedAt"),
+                origin="hf",
+                source_tier="research",
+                content_kind="research",
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
 
 
 def _scope_hn_query(query: str) -> str:

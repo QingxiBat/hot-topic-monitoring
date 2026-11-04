@@ -27,6 +27,12 @@ def json_loads(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -64,7 +70,11 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
-                enabled INTEGER NOT NULL DEFAULT 1
+                enabled INTEGER NOT NULL DEFAULT 1,
+                tier TEXT NOT NULL DEFAULT 'media',
+                content_kind TEXT NOT NULL DEFAULT 'news',
+                filter_ai INTEGER NOT NULL DEFAULT 0,
+                max_items INTEGER NOT NULL DEFAULT 6
             );
             CREATE TABLE IF NOT EXISTS articles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +96,8 @@ def init_db() -> None:
                 sensational INTEGER NOT NULL DEFAULT 0,
                 matched_keywords TEXT NOT NULL DEFAULT '[]',
                 also_sources TEXT NOT NULL DEFAULT '[]',
+                source_tier TEXT NOT NULL DEFAULT 'media',
+                content_kind TEXT NOT NULL DEFAULT 'news',
                 trigger TEXT DEFAULT 'schedule',
                 created_at TEXT NOT NULL
             );
@@ -120,6 +132,12 @@ def init_db() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_article_keyword ON alerts(article_id, keyword);
             """
         )
+        _ensure_column(conn, "feeds", "tier", "TEXT NOT NULL DEFAULT 'media'")
+        _ensure_column(conn, "feeds", "content_kind", "TEXT NOT NULL DEFAULT 'news'")
+        _ensure_column(conn, "feeds", "filter_ai", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "feeds", "max_items", "INTEGER NOT NULL DEFAULT 6")
+        _ensure_column(conn, "articles", "source_tier", "TEXT NOT NULL DEFAULT 'media'")
+        _ensure_column(conn, "articles", "content_kind", "TEXT NOT NULL DEFAULT 'news'")
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
@@ -131,12 +149,31 @@ def init_db() -> None:
                     "INSERT INTO scopes(name, query, description, enabled, created_at) VALUES(?, ?, ?, 1, ?)",
                     (scope["name"], scope["query"], scope["description"], now_iso()),
                 )
-        if conn.execute("SELECT COUNT(*) AS c FROM feeds").fetchone()["c"] == 0:
-            for name, url in DEFAULT_FEEDS:
-                conn.execute(
-                    "INSERT OR IGNORE INTO feeds(name, url, enabled) VALUES(?, ?, 1)",
-                    (name, url),
-                )
+        for feed in DEFAULT_FEEDS:
+            conn.execute(
+                "INSERT OR IGNORE INTO feeds(name, url, enabled, tier, content_kind, filter_ai, max_items) "
+                "VALUES(?, ?, 1, ?, ?, ?, ?)",
+                (
+                    feed["name"],
+                    feed["url"],
+                    feed.get("tier", "media"),
+                    feed.get("content_kind", "news"),
+                    1 if feed.get("filter_ai") else 0,
+                    int(feed.get("max_items", 6)),
+                ),
+            )
+            conn.execute(
+                "UPDATE feeds SET name = ?, tier = ?, content_kind = ?, filter_ai = ?, max_items = ? "
+                "WHERE url = ?",
+                (
+                    feed["name"],
+                    feed.get("tier", "media"),
+                    feed.get("content_kind", "news"),
+                    1 if feed.get("filter_ai") else 0,
+                    int(feed.get("max_items", 6)),
+                    feed["url"],
+                ),
+            )
         conn.commit()
 
 
@@ -285,7 +322,7 @@ def insert_article(article: dict[str, Any]) -> int:
         "url", "title", "summary", "source", "source_domain", "published_at", "fetched_at",
         "scope_names", "tags", "relevance", "credibility", "verdict", "verdict_reason",
         "ai_summary", "claim_type", "sensational", "matched_keywords", "also_sources",
-        "trigger", "created_at",
+        "source_tier", "content_kind", "trigger", "created_at",
     )
     values = [
         article.get("url"),
@@ -306,6 +343,8 @@ def insert_article(article: dict[str, Any]) -> int:
         1 if article.get("sensational") else 0,
         json_dumps(article.get("matched_keywords", [])),
         json_dumps(article.get("also_sources", [])),
+        article.get("source_tier", "media"),
+        article.get("content_kind", "news"),
         article.get("trigger", "schedule"),
         article.get("created_at") or now_iso(),
     ]

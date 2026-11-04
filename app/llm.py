@@ -138,6 +138,7 @@ class OllamaClient:
 5. claim_type：official（官方发布）/ third_party（媒体报道）/ rumor（传闻）/ opinion（观点）/ marketing（营销）/ unknown
 6. summary：一句话简体中文摘要（即使原标题是英文也必须翻译成中文），不超过 60 字
 7. tags：2-4 个中文或英文标签
+8. 研究论文、开源项目发布、开发者工具更新、AI 社区讨论，只要与 AI 技术相关，也应归入最接近的范围；只有泛科技、硬件、游戏、社会新闻才返回空数组
 
 候选新闻：
 {chr(10).join(lines)}
@@ -179,6 +180,7 @@ class OllamaClient:
 来源：{item.get("source") or item.get("source_domain") or "未知"}
 摘要：{(item.get("summary") or "")[:300]}
 
+研究论文、开源项目发布、开发者工具更新、AI 社区讨论，只要与 AI 技术相关，也应归入最接近的范围；只有泛科技/硬件/游戏/社会新闻才返回空数组。
 严格输出 JSON 对象：
 {{"scopes":["范围名"],"relevance":0,"credibility":0,"sensational":false,"claim_type":"unknown","summary":"一句简体中文摘要","tags":["标签"]}}
 不要输出解释。"""

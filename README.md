@@ -6,13 +6,14 @@
 
 - [需求文档](docs/01-需求文档.md)
 - [技术方案（含 MCP 最新资料核验）](docs/02-技术方案.md)
+- [信息源与检验策略](docs/03-信息源与检验策略.md)
 
 ## 功能
 
 - **关键词哨兵**：输入关键词，定时巡检 Google News、Bing News、Hacker News；AI 判断是否真的相关，并识别标题党、同名蹭热度、旧闻翻炒等风险。
-- **范围热点**：按「AI 编程 / 大模型 / AI Agent / 开源 AI」等范围定时采集，自动去重、跨源印证、排序展示。
+- **范围热点**：按 AI 编程、大模型、AI Agent、开源 AI、AI 芯片与算力、多模态与生成式、AI 产品与应用、AI 安全与合规、具身智能与机器人、AI 研究前沿等范围定时采集，自动去重、跨源印证、排序展示。
 - **分级告警**：已核实 / 高可信内容写入 Webhook；待核实内容只进站内电报，不打扰。
-- **响应式 Web 页面**：暖色编辑部风格，Canvas-free 雷达动画、电报流、实时 SSE 推送。
+- **响应式 Web 页面**：暖色编辑部风格、雷达动画、电报流、实时 SSE 推送。
 - **Agent Skills**：附带命令行技能，可交给其他 AI 监控和发现热点。
 
 ## 快速开始
@@ -52,20 +53,25 @@ ollama pull qwen3:8b
 
 ## 数据源
 
-无需任何 API Key：
+无需任何 API Key，均为公开 RSS / JSON / Atom：
 
-- Google News RSS（`when:7d` / `when:3d`）
-- Bing News RSS
-- Hacker News Algolia API
-- 精选 RSS：OpenAI、Google AI、DeepMind、Hugging Face、Simon Willison、Cursor Changelog、Ollama、GitHub Blog、The Decoder、TechCrunch AI、The Verge AI、量子位、Latent Space
+- 搜索与社区：Google News RSS、Bing News RSS、Hacker News Algolia
+- 官方/一手：OpenAI、Google AI、DeepMind、Hugging Face、Cursor、Ollama Blog/Releases、Qwen、NVIDIA、GitHub Blog、GitHub Releases（vLLM / llama.cpp / Transformers / LangChain / openai-python）
+- 科技媒体：Simon Willison、The Decoder、TechCrunch AI、The Verge AI、量子位、Latent Space、IT之家、InfoQ 中文、爱范儿、少数派、极客公园、钛媒体、OSChina、Techmeme
+- 社区/发现信号：SegmentFault、V2EX 热榜、掘金热榜、B站科技区排行/热门
+- 研究：HF Daily Papers
+
+完整清单、可用性实测与取舍见 [信息源与检验策略](docs/03-信息源与检验策略.md)。
 
 ## 可信度与反假冒
 
-每条内容经过三层校验：
+每条内容经过多层校验：
 
-1. **来源分层**：官方域名 / 头部媒体 / 中文科技媒体 / 社区 / 未知来源。
+1. **来源分层**：官方/一手、官方项目发布、媒体、社区、研究、热榜信号。
 2. **跨源印证**：标题相似度聚合，同一事件被多个独立域名报道时提升可信度。
 3. **AI 审阅**：`qwen3:8b` 输出相关度、可信度、标题党标记、内容类型与假冒风险。
+4. **分级封顶**：社区/热榜最高只到 `unverified`；研究论文最高 `likely`；官方发布与官方项目可到 `verified`。
+5. **噪声控制**：通用媒体先做 AI 关键词预过滤；单源限量；单关键词单轮告警上限。
 
 判定结果：
 

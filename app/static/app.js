@@ -22,6 +22,24 @@ const LEVEL_LABELS = {
   info: "待核实",
 };
 
+const KIND_LABELS = {
+  news: "新闻",
+  research: "论文",
+  release: "项目更新",
+  discussion: "社区讨论",
+  video: "视频",
+  heat: "热榜信号",
+};
+
+const TIER_LABELS = {
+  official: "官方",
+  release: "项目发布",
+  media: "媒体",
+  community: "社区",
+  heat: "热榜",
+  research: "研究",
+};
+
 const state = {
   scopes: [],
   keywords: [],
@@ -191,6 +209,8 @@ function topicMarkup(topic, index) {
     : "";
   const reason = topic.verdict_reason || "暂无判断依据";
   const claim = CLAIM_LABELS[topic.claim_type] || CLAIM_LABELS.unknown;
+  const kind = KIND_LABELS[topic.content_kind] || KIND_LABELS.news;
+  const tier = TIER_LABELS[topic.source_tier] || TIER_LABELS.media;
   return `
     <article class="topic" data-id="${topic.id}" style="--i:${index}">
       <span class="topic-stamp stamp-${verdict}">${stamp}</span>
@@ -207,6 +227,7 @@ function topicMarkup(topic, index) {
         <span class="topic-source">${escapeHtml(sourceText)} ${domain}</span>
         <span>可信度 <b>${Math.round(Number(topic.credibility || 0))}</b> <span class="cred-dots">${credDots(topic.credibility)}</span></span>
         ${corroboration}
+        <span class="topic-kind kind-${escapeHtml(topic.content_kind || "news")}">${escapeHtml(tier)} · ${escapeHtml(kind)}</span>
         <span>${escapeHtml(claim)}</span>
       </div>
       ${tagsMarkup}

@@ -14,7 +14,7 @@ def test_dashboard_defaults(client):
     response = client.get("/api/dashboard")
     assert response.status_code == 200
     data = response.json()
-    assert len(data["scopes"]) == 4
+    assert len(data["scopes"]) == 10
     assert data["settings"]["ollama_model"] == "qwen3:8b"
     assert "stats" in data
 

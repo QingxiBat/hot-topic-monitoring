@@ -644,6 +644,31 @@ a {
   color: var(--blue);
 }
 
+.topic-kind {
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.topic-kind.kind-research {
+  color: var(--blue);
+  border-color: rgba(61, 85, 104, 0.4);
+}
+
+.topic-kind.kind-release {
+  color: var(--olive);
+  border-color: rgba(92, 107, 60, 0.4);
+}
+
+.topic-kind.kind-community,
+.topic-kind.kind-video {
+  color: var(--gold);
+  border-color: rgba(166, 124, 45, 0.4);
+}
+
 .topic-tags {
   display: flex;
   flex-wrap: wrap;

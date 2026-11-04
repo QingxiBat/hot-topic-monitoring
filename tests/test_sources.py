@@ -8,6 +8,7 @@ from app.sources import (
     clean_html,
     decode_bing_link,
     domain_of,
+    matches_ai_hint,
     normalize_title,
     title_similarity,
 )
@@ -79,8 +80,29 @@ def test_scope_hn_query_uses_first_ascii_token():
     assert _scope_hn_query("人工智能") == "人工智能"
 
 
+def test_matches_ai_hint():
+    assert matches_ai_hint("NVIDIA launches a new GPU")
+    assert matches_ai_hint("DeepSeek 发布新模型")
+    assert matches_ai_hint("AI 编程工具更新")
+    assert not matches_ai_hint("Apple announces iPhone 18")
+    assert not matches_ai_hint("email detail")
+
+
+def test_default_scopes_cover_ai_breadth():
+    from app.config import DEFAULT_SCOPES
+
+    names = [scope["name"] for scope in DEFAULT_SCOPES]
+    assert len(names) == 10
+    assert "AI 芯片与算力" in names
+    assert "多模态与生成式" in names
+    assert "AI 安全与合规" in names
+    assert "AI 研究前沿" in names
+
+
 def test_raw_item_to_dict():
     item = RawItem(title="T", url="https://e.com/1", source="S", source_domain="e.com")
     data = item.to_dict()
     assert data["title"] == "T"
     assert data["source_domain"] == "e.com"
+    assert data["source_tier"] == "media"
+    assert data["content_kind"] == "news"

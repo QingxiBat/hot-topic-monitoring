@@ -11,7 +11,7 @@ node_modules/
 
 # 本地私有配置，不提交
 opencode.json
-prompt.md
+prompts/
 skills-lock.json
 .claude/
 

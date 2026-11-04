@@ -132,6 +132,7 @@ python scripts/radar.py --json keywords --action check --wait
 - Always include the source name, publish time, and original URL.
 - State the credibility label from the tool: `已核实` (verified), `可信` (likely), `待核实` (unverified), `存疑` (suspicious).
 - If `also_sources` contains multiple domains, mention how many independent sources corroborate the story.
+- Respect `source_tier` and `content_kind`: community/heat items are discovery signals (最高 `unverified`), research papers are labeled “论文/研究” (最高 `likely`), GitHub releases are “项目更新”.
 - Do not repeat a suspicious claim as fact. Say "存疑/待核实" and explain the AI's reason.
 - Prefer 3–7 items, ordered by importance, not by raw feed order.
 - Do not claim the tool covers "all news"; it covers the configured public sources and scopes.
