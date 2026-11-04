@@ -292,8 +292,76 @@ def test_topics_filter_validation(client):
     assert client.get("/api/topics?time_field=unknown").status_code == 400
     assert client.get("/api/topics?tier=unknown").status_code == 400
     assert client.get("/api/topics?kind=unknown").status_code == 400
+    assert client.get("/api/topics?match_level=unknown").status_code == 400
     assert client.get("/api/topics?min_credibility=80&max_credibility=60").status_code == 400
     assert client.get("/api/topics?single_source=true&min_sources=2").status_code == 400
+
+
+def test_keyword_match_fields_and_filter(client):
+    article_id = _insert_article(
+        url="https://example.com/keyword-match",
+        title="Anthropic launches Claude Sonnet 4.6",
+        scope_names=["AI 编程"],
+    )
+    db.upsert_keyword_match(
+        article_id,
+        "Claude Sonnet 4.6",
+        "strong",
+        ["Claude", "Sonnet", "4.6"],
+        [],
+        "Anthropic launches Claude Sonnet 4.6",
+        "命中全部核心锚点",
+        "Anthropic 发布新模型。",
+        '"Claude Sonnet 4.6"',
+        "plan123",
+        92,
+        88,
+    )
+    db.create_alert(article_id, "Claude Sonnet 4.6", "critical", "Anthropic launches Claude Sonnet 4.6", "强匹配")
+
+    strong = client.get("/api/topics?match_level=strong").json()["items"]
+    assert [item["id"] for item in strong] == [article_id]
+    assert strong[0]["best_match"]["match_level"] == "strong"
+
+    weak = client.get("/api/topics?match_level=weak").json()["items"]
+    assert weak == []
+
+    detail = client.get(f"/api/topics/{article_id}").json()
+    assert detail["best_match"]["match_level"] == "strong"
+    assert detail["keyword_matches"][0]["matched_anchors"] == ["Claude", "Sonnet", "4.6"]
+
+    alerts = client.get("/api/alerts").json()
+    assert alerts[0]["match_level"] == "strong"
+    assert alerts[0]["matched_anchors"] == ["Claude", "Sonnet", "4.6"]
+    assert alerts[0]["match_evidence"] == "Anthropic launches Claude Sonnet 4.6"
+    assert alerts[0]["match_reason"] == "命中全部核心锚点"
+
+
+def test_match_level_filter_includes_keyword_only(client):
+    article_id = _insert_article(
+        url="https://example.com/keyword-only-match",
+        title="Claude Sonnet 4.6 shipped",
+        scope_names=[],
+        matched_keywords=["Claude Sonnet 4.6"],
+    )
+    db.upsert_keyword_match(
+        article_id,
+        "Claude Sonnet 4.6",
+        "strong",
+        ["Claude", "Sonnet", "4.6"],
+        [],
+        "Claude Sonnet 4.6 shipped",
+        "命中全部核心锚点",
+        "摘要",
+        '"Claude Sonnet 4.6"',
+        "plan123",
+        90,
+        80,
+    )
+    items = client.get("/api/topics?match_level=strong").json()["items"]
+    assert [item["id"] for item in items] == [article_id]
+    default_items = client.get("/api/topics").json()["items"]
+    assert default_items == []
 
 
 def test_alerts_join_and_mark_read(client):

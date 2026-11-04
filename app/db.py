@@ -73,7 +73,9 @@ def init_db() -> None:
                 term TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
-                last_checked_at TEXT
+                last_checked_at TEXT,
+                query_plan TEXT NOT NULL DEFAULT '{}',
+                plan_updated_at TEXT
             );
             CREATE TABLE IF NOT EXISTS feeds (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +112,25 @@ def init_db() -> None:
                 trigger TEXT DEFAULT 'schedule',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS keyword_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_id INTEGER NOT NULL,
+                keyword TEXT NOT NULL,
+                match_level TEXT NOT NULL DEFAULT 'weak',
+                matched_anchors TEXT NOT NULL DEFAULT '[]',
+                missing_anchors TEXT NOT NULL DEFAULT '[]',
+                evidence TEXT DEFAULT '',
+                match_reason TEXT DEFAULT '',
+                content_summary TEXT DEFAULT '',
+                query_used TEXT DEFAULT '',
+                plan_hash TEXT DEFAULT '',
+                relevance REAL NOT NULL DEFAULT 0,
+                credibility REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(article_id, keyword),
+                FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 article_id INTEGER NOT NULL,
@@ -139,6 +160,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at DESC);
             CREATE INDEX IF NOT EXISTS idx_articles_credibility ON articles(credibility DESC);
             CREATE INDEX IF NOT EXISTS idx_articles_relevance ON articles(relevance DESC);
+            CREATE INDEX IF NOT EXISTS idx_keyword_matches_keyword ON keyword_matches(keyword, match_level);
+            CREATE INDEX IF NOT EXISTS idx_keyword_matches_article ON keyword_matches(article_id);
             CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_article_keyword ON alerts(article_id, keyword);
             """
@@ -149,6 +172,8 @@ def init_db() -> None:
         _ensure_column(conn, "feeds", "max_items", "INTEGER NOT NULL DEFAULT 6")
         _ensure_column(conn, "articles", "source_tier", "TEXT NOT NULL DEFAULT 'media'")
         _ensure_column(conn, "articles", "content_kind", "TEXT NOT NULL DEFAULT 'news'")
+        _ensure_column(conn, "keywords", "query_plan", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(conn, "keywords", "plan_updated_at", "TEXT")
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
@@ -304,6 +329,127 @@ def delete_keyword(keyword_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def save_keyword_plan(keyword_id: int, plan: dict[str, Any]) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE keywords SET query_plan = ?, plan_updated_at = ? WHERE id = ?",
+            (json_dumps(plan), now_iso(), keyword_id),
+        )
+        conn.commit()
+
+
+def upsert_keyword_match(
+    article_id: int,
+    keyword: str,
+    match_level: str,
+    matched_anchors: list[str],
+    missing_anchors: list[str],
+    evidence: str,
+    match_reason: str,
+    content_summary: str,
+    query_used: str,
+    plan_hash: str,
+    relevance: float,
+    credibility: float,
+) -> dict[str, Any]:
+    timestamp = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO keyword_matches(
+                article_id, keyword, match_level, matched_anchors, missing_anchors,
+                evidence, match_reason, content_summary, query_used, plan_hash,
+                relevance, credibility, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(article_id, keyword) DO UPDATE SET
+                match_level = excluded.match_level,
+                matched_anchors = excluded.matched_anchors,
+                missing_anchors = excluded.missing_anchors,
+                evidence = excluded.evidence,
+                match_reason = excluded.match_reason,
+                content_summary = excluded.content_summary,
+                query_used = excluded.query_used,
+                plan_hash = excluded.plan_hash,
+                relevance = excluded.relevance,
+                credibility = excluded.credibility,
+                updated_at = excluded.updated_at
+            """,
+            (
+                article_id,
+                keyword,
+                match_level,
+                json_dumps(matched_anchors),
+                json_dumps(missing_anchors),
+                evidence[:300],
+                match_reason[:300],
+                content_summary[:300],
+                query_used[:300],
+                plan_hash,
+                float(relevance or 0),
+                float(credibility or 0),
+                timestamp,
+                timestamp,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM keyword_matches WHERE article_id = ? AND keyword = ?",
+            (article_id, keyword),
+        ).fetchone()
+    return _serialize_keyword_match(row_to_dict(row))
+
+
+def _serialize_keyword_match(match: dict[str, Any]) -> dict[str, Any]:
+    match["matched_anchors"] = json_loads(match.get("matched_anchors"), [])
+    match["missing_anchors"] = json_loads(match.get("missing_anchors"), [])
+    return match
+
+
+def list_keyword_matches(
+    article_id: int | None = None,
+    keyword: str | None = None,
+    match_levels: list[str] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    values: list[Any] = []
+    if article_id is not None:
+        clauses.append("article_id = ?")
+        values.append(article_id)
+    if keyword:
+        clauses.append("keyword = ?")
+        values.append(keyword)
+    levels = _as_filter_list(match_levels)
+    if levels:
+        clauses.append("match_level IN (" + ", ".join("?" for _ in levels) + ")")
+        values.extend(levels)
+    sql = "SELECT * FROM keyword_matches"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY updated_at DESC LIMIT ?"
+    values.append(limit)
+    with connect() as conn:
+        rows = conn.execute(sql, values).fetchall()
+    return [_serialize_keyword_match(row_to_dict(row)) for row in rows]
+
+
+def get_best_keyword_match(article_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM keyword_matches
+            WHERE article_id = ?
+            ORDER BY CASE match_level
+                WHEN 'exact' THEN 4 WHEN 'strong' THEN 3
+                WHEN 'partial' THEN 2 WHEN 'weak' THEN 1 ELSE 0 END DESC,
+                relevance DESC, updated_at DESC
+            LIMIT 1
+            """,
+            (article_id,),
+        ).fetchone()
+    return _serialize_keyword_match(row_to_dict(row)) if row else None
+
+
 def list_feeds(enabled_only: bool = True) -> list[dict[str, Any]]:
     sql = "SELECT * FROM feeds"
     if enabled_only:
@@ -430,6 +576,7 @@ def _topic_filter_clauses(
     query: str | None,
     time_field: str,
     has_keyword: bool,
+    match_levels: str | list[str] | None,
 ) -> tuple[list[str], list[Any]]:
     since = (now_utc() - timedelta(hours=since_hours)).isoformat()
     clauses: list[str] = []
@@ -441,7 +588,9 @@ def _topic_filter_clauses(
         clauses.append("COALESCE(published_at, fetched_at) >= ?")
     values.append(since)
 
-    if not include_keyword_only:
+    keyword_values = _as_filter_list(keywords)
+    levels = _as_filter_list(match_levels)
+    if not include_keyword_only and not has_keyword and not keyword_values and not levels:
         clauses.append("scope_names != '[]'")
 
     scopes = _as_filter_list(scope)
@@ -483,7 +632,6 @@ def _topic_filter_clauses(
         clauses.append(f"{SOURCE_COUNT_SQL} >= ?")
         values.append(max(1, int(min_sources)))
 
-    keyword_values = _as_filter_list(keywords)
     if keyword_values:
         clauses.append(
             "(" + " OR ".join("matched_keywords LIKE ?" for _ in keyword_values) + ")"
@@ -491,6 +639,13 @@ def _topic_filter_clauses(
         values.extend(f'%"{item}"%' for item in keyword_values)
     if has_keyword:
         clauses.append("matched_keywords != '[]'")
+
+    if levels:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM keyword_matches km WHERE km.article_id = articles.id "
+            "AND km.match_level IN (" + ", ".join("?" for _ in levels) + "))"
+        )
+        values.extend(levels)
 
     if query:
         term = f"%{_like_escape(query.strip())}%"
@@ -561,6 +716,7 @@ def query_topics(
     time_field: str = "published",
     sort: str = "composite",
     has_keyword: bool = False,
+    match_levels: str | list[str] | None = None,
 ) -> dict[str, Any]:
     if time_field not in TIME_FIELDS:
         time_field = "published"
@@ -583,6 +739,7 @@ def query_topics(
         query=query,
         time_field=time_field,
         has_keyword=has_keyword,
+        match_levels=match_levels,
     )
     where = " AND ".join(clauses)
     order = _topic_order_sql(sort)
@@ -594,8 +751,10 @@ def query_topics(
             f"SELECT * FROM articles WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
             [*values, limit, offset],
         ).fetchall()
+    items = [_serialize_article(row_to_dict(row)) for row in rows]
+    _attach_keyword_matches(items)
     return {
-        "items": [_serialize_article(row_to_dict(row)) for row in rows],
+        "items": items,
         "total": int(total),
     }
 
@@ -623,7 +782,11 @@ def list_topics(
 def get_article(article_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM articles WHERE id = ?", (article_id,)).fetchone()
-    return _serialize_article(row_to_dict(row)) if row else None
+    if not row:
+        return None
+    article = _serialize_article(row_to_dict(row))
+    _attach_keyword_matches([article])
+    return article
 
 
 def _serialize_article(article: dict[str, Any]) -> dict[str, Any]:
@@ -633,6 +796,44 @@ def _serialize_article(article: dict[str, Any]) -> dict[str, Any]:
     article["also_sources"] = json_loads(article.get("also_sources"), [])
     article["sensational"] = bool(article.get("sensational"))
     return article
+
+
+def _attach_keyword_matches(articles: list[dict[str, Any]]) -> None:
+    if not articles:
+        return
+    ids = [article["id"] for article in articles]
+    placeholders = ", ".join("?" for _ in ids)
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM keyword_matches WHERE article_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        match = _serialize_keyword_match(row_to_dict(row))
+        grouped.setdefault(int(match["article_id"]), []).append(match)
+    rank = {"exact": 4, "strong": 3, "partial": 2, "weak": 1}
+    for article in articles:
+        matches = grouped.get(int(article["id"]), [])
+        matches.sort(
+            key=lambda item: (
+                rank.get(item.get("match_level"), 0),
+                float(item.get("relevance") or 0),
+                item.get("updated_at") or "",
+            ),
+            reverse=True,
+        )
+        article["keyword_matches"] = matches
+        article["best_match"] = matches[0] if matches else None
+
+
+def alert_exists(article_id: int, keyword: str) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM alerts WHERE article_id = ? AND keyword = ? LIMIT 1",
+            (article_id, keyword),
+        ).fetchone()
+    return row is not None
 
 
 def create_alert(
@@ -655,8 +856,13 @@ def create_alert(
 def list_alerts(limit: int = 30, unread_only: bool = False) -> list[dict[str, Any]]:
     sql = (
         "SELECT alerts.*, articles.url AS article_url, articles.source AS source, "
-        "articles.verdict AS verdict, articles.credibility AS credibility "
-        "FROM alerts LEFT JOIN articles ON articles.id = alerts.article_id"
+        "articles.verdict AS verdict, articles.credibility AS credibility, "
+        "km.match_level AS match_level, km.matched_anchors AS matched_anchors, "
+        "km.missing_anchors AS missing_anchors, km.evidence AS match_evidence, "
+        "km.match_reason AS match_reason, km.content_summary AS content_summary "
+        "FROM alerts LEFT JOIN articles ON articles.id = alerts.article_id "
+        "LEFT JOIN keyword_matches km ON km.article_id = alerts.article_id "
+        "AND km.keyword = alerts.keyword"
     )
     if unread_only:
         sql += " WHERE alerts.read = 0"
@@ -668,6 +874,8 @@ def list_alerts(limit: int = 30, unread_only: bool = False) -> list[dict[str, An
         item = row_to_dict(row)
         item["read"] = bool(item["read"])
         item["pushed"] = bool(item["pushed"])
+        item["matched_anchors"] = json_loads(item.get("matched_anchors"), [])
+        item["missing_anchors"] = json_loads(item.get("missing_anchors"), [])
         alerts.append(item)
     return alerts
 

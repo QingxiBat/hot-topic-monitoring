@@ -7,6 +7,13 @@ const VERDICT_LABELS = {
   suspicious: "存疑",
 };
 
+const MATCH_LEVEL_LABELS = {
+  exact: "精确匹配",
+  strong: "强匹配",
+  partial: "部分匹配",
+  weak: "弱相关",
+};
+
 const CLAIM_LABELS = {
   official: "官方发布",
   third_party: "媒体报道",
@@ -43,6 +50,7 @@ const TIER_LABELS = {
 const VERDICT_ORDER = ["verified", "likely", "unverified", "suspicious"];
 const TIER_OPTIONS = ["official", "release", "research", "media", "community", "heat"];
 const KIND_OPTIONS = ["news", "release", "research", "discussion", "video", "heat"];
+const MATCH_LEVEL_ORDER = ["exact", "strong", "partial", "weak"];
 
 const PRESETS = {
   all: { label: "全部", timeHours: 168, timeField: "published", sort: "composite" },
@@ -86,9 +94,9 @@ const QUICK_CHIPS = [
 
 const FILTER_STORAGE_KEY = "signalradar.filters.v1";
 const FILTER_PARAM_KEYS = [
-  "scope", "verdict", "tier", "kind", "since_hours", "time_field", "min_credibility",
-  "max_credibility", "min_relevance", "max_relevance", "min_sources", "single_source",
-  "keyword", "has_keyword", "include_keyword_only", "q", "sort", "preset",
+  "scope", "verdict", "tier", "kind", "match_level", "since_hours", "time_field",
+  "min_credibility", "max_credibility", "min_relevance", "max_relevance", "min_sources",
+  "single_source", "keyword", "has_keyword", "include_keyword_only", "q", "sort", "preset",
 ];
 
 function defaultFilters() {
@@ -97,6 +105,7 @@ function defaultFilters() {
     verdicts: [],
     tiers: [],
     kinds: [],
+    matchLevels: [],
     timeHours: 168,
     timeField: "published",
     minCredibility: null,
@@ -195,6 +204,7 @@ function filtersFromState() {
     verdicts: [...state.verdicts],
     tiers: [...state.tiers],
     kinds: [...state.kinds],
+    matchLevels: [...state.matchLevels],
     timeHours: state.timeHours,
     timeField: state.timeField,
     minCredibility: state.minCredibility,
@@ -221,6 +231,7 @@ function sanitizeFilters(raw) {
   filters.verdicts = list(raw.verdicts, VERDICT_ORDER);
   filters.tiers = list(raw.tiers, TIER_OPTIONS);
   filters.kinds = list(raw.kinds, KIND_OPTIONS);
+  filters.matchLevels = list(raw.matchLevels, MATCH_LEVEL_ORDER);
   filters.timeHours = [24, 72, 168, 720].includes(Number(raw.timeHours)) ? Number(raw.timeHours) : 168;
   filters.timeField = ["published", "fetched"].includes(raw.timeField) ? raw.timeField : "published";
   filters.minCredibility = numberOrNull(raw.minCredibility);
@@ -246,6 +257,7 @@ function filtersFromParams(params) {
   if (params.has("verdict")) filters.verdicts = params.getAll("verdict");
   if (params.has("tier")) filters.tiers = params.getAll("tier");
   if (params.has("kind")) filters.kinds = params.getAll("kind");
+  if (params.has("match_level")) filters.matchLevels = params.getAll("match_level");
   if (params.has("since_hours")) filters.timeHours = Number(params.get("since_hours"));
   if (params.has("time_field")) filters.timeField = params.get("time_field");
   filters.minCredibility = numberOrNull(params.get("min_credibility"));
@@ -297,6 +309,7 @@ function persistFilters() {
   filters.verdicts.forEach((item) => params.append("verdict", item));
   filters.tiers.forEach((item) => params.append("tier", item));
   filters.kinds.forEach((item) => params.append("kind", item));
+  filters.matchLevels.forEach((item) => params.append("match_level", item));
   if (filters.timeHours !== 168) params.set("since_hours", String(filters.timeHours));
   if (filters.timeField !== "published") params.set("time_field", filters.timeField);
   if (filters.minCredibility != null) params.set("min_credibility", String(filters.minCredibility));
@@ -322,6 +335,7 @@ function activeFilterCount() {
   count += state.verdicts.length;
   count += state.tiers.length;
   count += state.kinds.length;
+  count += state.matchLevels.length;
   if (state.timeHours !== 168 || state.timeField !== "published") count += 1;
   if (state.minCredibility != null || state.maxCredibility != null) count += 1;
   if (state.minRelevance != null || state.maxRelevance != null) count += 1;
@@ -333,12 +347,12 @@ function activeFilterCount() {
   return count;
 }
 
-function filterOptionMarkup(name, values, labels) {
+function filterOptionMarkup(name, values, labels, stateKey) {
   return values
     .map(
       (value) => `
         <label class="check-chip">
-          <input type="checkbox" name="${name}" value="${escapeHtml(value)}"${state[name === "verdict" ? "verdicts" : name === "tier" ? "tiers" : "kinds"].includes(value) ? " checked" : ""}>
+          <input type="checkbox" name="${name}" value="${escapeHtml(value)}"${state[stateKey].includes(value) ? " checked" : ""}>
           <span>${escapeHtml(labels[value] || value)}</span>
         </label>
       `
@@ -347,9 +361,15 @@ function filterOptionMarkup(name, values, labels) {
 }
 
 function renderFilterOptions() {
-  $("verdictOptions").innerHTML = filterOptionMarkup("verdict", VERDICT_ORDER, VERDICT_LABELS);
-  $("tierOptions").innerHTML = filterOptionMarkup("tier", TIER_OPTIONS, TIER_LABELS);
-  $("kindOptions").innerHTML = filterOptionMarkup("kind", KIND_OPTIONS, KIND_LABELS);
+  $("verdictOptions").innerHTML = filterOptionMarkup("verdict", VERDICT_ORDER, VERDICT_LABELS, "verdicts");
+  $("tierOptions").innerHTML = filterOptionMarkup("tier", TIER_OPTIONS, TIER_LABELS, "tiers");
+  $("kindOptions").innerHTML = filterOptionMarkup("kind", KIND_OPTIONS, KIND_LABELS, "kinds");
+  $("matchLevelOptions").innerHTML = filterOptionMarkup(
+    "match_level",
+    MATCH_LEVEL_ORDER,
+    MATCH_LEVEL_LABELS,
+    "matchLevels"
+  );
 }
 
 function renderKeywordOptions() {
@@ -402,6 +422,9 @@ function activeFilterEntries() {
   );
   state.kinds.forEach((item) =>
     entries.push({ filter: "kind", value: item, label: KIND_LABELS[item] || item })
+  );
+  state.matchLevels.forEach((item) =>
+    entries.push({ filter: "matchLevel", value: item, label: MATCH_LEVEL_LABELS[item] || item })
   );
   if (state.timeHours !== 168 || state.timeField !== "published") {
     const hours = state.timeHours === 24 ? "24 小时" : state.timeHours === 72 ? "3 天" : state.timeHours === 720 ? "30 天" : "7 天";
@@ -485,6 +508,7 @@ function readFilterControls() {
   state.verdicts = Array.from(document.querySelectorAll('#verdictOptions input:checked')).map((el) => el.value);
   state.tiers = Array.from(document.querySelectorAll('#tierOptions input:checked')).map((el) => el.value);
   state.kinds = Array.from(document.querySelectorAll('#kindOptions input:checked')).map((el) => el.value);
+  state.matchLevels = Array.from(document.querySelectorAll('#matchLevelOptions input:checked')).map((el) => el.value);
   state.preset = "";
 }
 
@@ -528,6 +552,7 @@ function clearFilter(key, value) {
   else if (key === "verdict") state.verdicts = state.verdicts.filter((item) => item !== value);
   else if (key === "tier") state.tiers = state.tiers.filter((item) => item !== value);
   else if (key === "kind") state.kinds = state.kinds.filter((item) => item !== value);
+  else if (key === "matchLevel") state.matchLevels = state.matchLevels.filter((item) => item !== value);
   else if (key === "time") {
     state.timeHours = 168;
     state.timeField = "published";
@@ -652,6 +677,23 @@ function topicMarkup(topic, index) {
   const claim = CLAIM_LABELS[topic.claim_type] || CLAIM_LABELS.unknown;
   const kind = KIND_LABELS[topic.content_kind] || KIND_LABELS.news;
   const tier = TIER_LABELS[topic.source_tier] || TIER_LABELS.media;
+  const bestMatch = topic.best_match;
+  const matchLevel = bestMatch ? bestMatch.match_level : "";
+  const matchLabel = MATCH_LEVEL_LABELS[matchLevel] || "";
+  const matchedAnchors = bestMatch && Array.isArray(bestMatch.matched_anchors) ? bestMatch.matched_anchors : [];
+  const matchBadge = matchLevel
+    ? `<span class="match-badge match-${escapeHtml(matchLevel)}">${escapeHtml(matchLabel)}</span>`
+    : "";
+  const matchMarkup = bestMatch
+    ? `
+        <p class="match-line">
+          <span>关键词 ${escapeHtml(bestMatch.keyword)}</span>
+          ${matchedAnchors.length ? `<span>命中 ${matchedAnchors.map((item) => escapeHtml(item)).join(" / ")}</span>` : ""}
+        </p>
+        ${bestMatch.evidence ? `<p class="match-evidence">证据：${escapeHtml(bestMatch.evidence)}</p>` : ""}
+        ${bestMatch.match_reason ? `<p class="match-reason">${escapeHtml(bestMatch.match_reason)}</p>` : ""}
+      `
+    : "";
   return `
     <article class="topic" data-id="${topic.id}" style="--i:${index}">
       <span class="topic-stamp stamp-${verdict}">${stamp}</span>
@@ -670,10 +712,12 @@ function topicMarkup(topic, index) {
         ${corroboration}
         <span class="topic-kind kind-${escapeHtml(topic.content_kind || "news")}">${escapeHtml(tier)} · ${escapeHtml(kind)}</span>
         <span>${escapeHtml(claim)}</span>
+        ${matchBadge}
       </div>
       ${tagsMarkup}
       <details class="topic-more">
         <summary>判断依据</summary>
+        ${matchMarkup}
         <p>${escapeHtml(reason)}</p>
         <p>AI 摘要由本地 qwen3:8b 生成，请以原文为准。</p>
       </details>
@@ -762,14 +806,23 @@ function renderAlerts() {
       if (alert.source) metaParts.push(escapeHtml(alert.source));
       if (credibility != null) metaParts.push(`可信度 ${credibility}`);
       metaParts.push(alert.pushed ? "已推送" : "仅站内");
+      const matchLevel = alert.match_level || "";
+      const matchLabel = MATCH_LEVEL_LABELS[matchLevel] || "";
+      const anchors = Array.isArray(alert.matched_anchors) ? alert.matched_anchors : [];
+      const matchBadge = matchLevel
+        ? `<span class="match-badge match-${escapeHtml(matchLevel)}">${escapeHtml(matchLabel)}</span>`
+        : "";
       return `
         <li class="alert-item${alert.read ? "" : " unread"}" data-id="${alert.id}" data-url="${safeUrl(alert.article_url)}">
           <div class="alert-top">
             <span class="alert-level level-${level}">${LEVEL_LABELS[level]}</span>
             <span>${escapeHtml(alert.keyword)}</span>
+            ${matchBadge}
             <span style="margin-left:auto">${escapeHtml(formatRelative(alert.created_at))}</span>
           </div>
           <p class="alert-title">${escapeHtml(alert.title)}</p>
+          ${anchors.length ? `<p class="alert-match">命中 ${anchors.map((item) => escapeHtml(item)).join(" / ")}</p>` : ""}
+          ${alert.match_evidence ? `<p class="alert-evidence">证据：${escapeHtml(alert.match_evidence)}</p>` : ""}
           <div class="alert-meta">${metaParts.join(" · ")}</div>
         </li>
       `;
@@ -860,6 +913,7 @@ async function fetchTopics({ reset = false } = {}) {
   state.verdicts.forEach((item) => params.append("verdict", item));
   state.tiers.forEach((item) => params.append("tier", item));
   state.kinds.forEach((item) => params.append("kind", item));
+  state.matchLevels.forEach((item) => params.append("match_level", item));
   if (state.minCredibility != null) params.set("min_credibility", String(state.minCredibility));
   if (state.maxCredibility != null) params.set("max_credibility", String(state.maxCredibility));
   if (state.minRelevance != null) params.set("min_relevance", String(state.minRelevance));

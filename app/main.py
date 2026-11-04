@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import db
 from .config import STATIC_DIR
+from .keyword_plan import MATCH_LEVELS
 from .llm import OllamaClient
 from .notifier import broker, test_webhook
 from .pipeline import run_collect, run_keyword_check
@@ -189,12 +190,14 @@ def topics(
     q: str | None = Query(default=None, max_length=200),
     time_field: str = Query(default="published"),
     sort: str = Query(default="composite"),
+    match_level: list[str] | None = Query(default=None),
 ):
     scope = _clean_text_list(scope, "范围", 60)
     verdict = _clean_allowed_list(verdict, VERDICTS, "可信度筛选")
     tier = _clean_allowed_list(tier, TIERS, "来源层级")
     kind = _clean_allowed_list(kind, KINDS, "内容类型")
     keyword = _clean_text_list(keyword, "关键词", 80)
+    match_level = _clean_allowed_list(match_level, MATCH_LEVELS, "匹配等级")
     if sort not in db.TOPIC_SORTS:
         raise HTTPException(status_code=400, detail="未知的排序方式")
     if time_field not in db.TIME_FIELDS:
@@ -229,6 +232,7 @@ def topics(
         time_field=time_field,
         sort=sort,
         has_keyword=has_keyword,
+        match_levels=match_level,
     )
     return {
         "items": result["items"],

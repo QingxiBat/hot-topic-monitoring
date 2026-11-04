@@ -73,11 +73,23 @@ Useful flags:
 - `--min-sources 2` — require at least 2 independent domains; `--single-source` does the opposite.
 - `--keyword "Claude"` — filter by a matched keyword; repeatable.
 - `--has-keyword` — only items matched by a keyword watch.
+- `--match-level exact|strong|partial|weak` — filter by keyword match level; repeatable.
 - `--q "Agent"` — search title, summary, AI summary, and tags.
 - `--sort composite|newest|fetched|credibility|relevance|sources` — default is `composite`.
 - `--include-keyword-only` — include articles found only by keyword watches.
 
-### 3. Collect fresh hotspots
+### 3. Keyword match levels
+
+Keyword results include `best_match` with:
+
+- `match_level`: `exact` / `strong` / `partial` / `weak`
+- `matched_anchors` and `missing_anchors`
+- `evidence`: the original sentence that supports the match
+- `match_reason`: why it matched or was downgraded
+
+Default policy is strict: only `exact` and `strong` generate alerts. `partial` and `weak` are stored for review but not pushed. When presenting results, always show the match level and evidence before summarizing the content.
+
+### 4. Collect fresh hotspots
 
 ```bash
 python scripts/radar.py --json collect --scope "AI 编程" --wait
@@ -88,7 +100,7 @@ python scripts/radar.py --json collect --scope "AI 编程" --wait
 - A full collection can take 1–3 minutes because local `qwen3:8b` classifies each item.
 - If the web service is running, prefer `--api ... collect ...` so the app handles concurrency.
 
-### 4. Scan and return results in one step (recommended)
+### 5. Scan and return results in one step (recommended)
 
 ```bash
 python scripts/radar.py --json scan --scope "AI 编程" --limit 10 --hours 72 --sort composite
@@ -96,7 +108,7 @@ python scripts/radar.py --json scan --scope "AI 编程" --limit 10 --hours 72 --
 
 `scan` accepts the same filter flags as `topics`. Use `--no-collect` to only read existing results without contacting sources.
 
-### 5. Watch a keyword
+### 6. Watch a keyword
 
 ```bash
 python scripts/radar.py --json watch --term "Claude Code" --check
@@ -110,7 +122,7 @@ Then read alert telegrams:
 python scripts/radar.py --json alerts --limit 10
 ```
 
-### 6. Fact-check a claim
+### 7. Fact-check a claim
 
 ```bash
 python scripts/radar.py --json verify \
@@ -123,7 +135,7 @@ python scripts/radar.py --json verify \
 
 Returns `verdict`, `credibility`, `fake_risk`, `reason`, and `what_to_check`. Treat this as an editorial aid, not ground truth.
 
-### 7. Manage scopes and keywords
+### 8. Manage scopes and keywords
 
 ```bash
 python scripts/radar.py --json scopes --action list

@@ -109,10 +109,23 @@ def _level_label(level: str) -> str:
 
 
 async def notify_alert(alert: dict[str, Any], article: dict[str, Any], settings: dict[str, Any]) -> bool:
+    matches = db.list_keyword_matches(
+        article_id=article.get("id"), keyword=alert.get("keyword"), limit=1
+    )
+    match = matches[0] if matches else {}
+    enriched_alert = {
+        **alert,
+        "match_level": match.get("match_level"),
+        "matched_anchors": match.get("matched_anchors", []),
+        "missing_anchors": match.get("missing_anchors", []),
+        "match_evidence": match.get("evidence", ""),
+        "match_reason": match.get("match_reason", ""),
+        "content_summary": match.get("content_summary", ""),
+    }
     broker.publish(
         "alert",
         {
-            "alert": alert,
+            "alert": enriched_alert,
             "article": {
                 "id": article.get("id"),
                 "title": article.get("title"),
@@ -130,9 +143,19 @@ async def notify_alert(alert: dict[str, Any], article: dict[str, Any], settings:
     if float(article.get("credibility") or 0) < float(settings.get("alert_min_credibility", 60)):
         db.mark_alert_pushed(alert["id"], False, "低于推送可信度阈值")
         return False
+    match_label = {
+        "exact": "精确匹配",
+        "strong": "强匹配",
+        "partial": "部分匹配",
+        "weak": "弱相关",
+    }.get(match.get("match_level"), "")
+    evidence = match.get("evidence") or ""
+    evidence_line = f"{evidence}\n" if evidence else ""
     text = (
-        f"【SignalRadar · {_level_label(alert['level'])}】{alert['keyword']}\n"
+        f"【SignalRadar · {_level_label(alert['level'])}】{alert['keyword']}"
+        f"{' · ' + match_label if match_label else ''}\n"
         f"{article['title']}\n"
+        f"{evidence_line}"
         f"{(article.get('ai_summary') or article.get('summary') or '')[:120]}\n"
         f"{article['url']}"
     )
@@ -143,6 +166,9 @@ async def notify_alert(alert: dict[str, Any], article: dict[str, Any], settings:
             "title": article["title"],
             "keyword": alert["keyword"],
             "level": alert["level"],
+            "match_level": match.get("match_level"),
+            "matched_anchors": match.get("matched_anchors", []),
+            "evidence": evidence,
             "verdict": article.get("verdict"),
             "url": article.get("url"),
             "summary": article.get("ai_summary") or article.get("summary"),

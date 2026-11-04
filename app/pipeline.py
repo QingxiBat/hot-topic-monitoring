@@ -3,6 +3,15 @@ import re
 from typing import Any
 
 from . import db
+from .keyword_plan import (
+    deterministic_plan,
+    evaluate_text,
+    is_alertable,
+    merged_level,
+    plan_hash,
+    relevance_cap,
+    validate_plan,
+)
 from .llm import OllamaClient
 from .notifier import broker, notify_alert
 from .sources import (
@@ -539,6 +548,53 @@ async def run_collect(
             return {"status": "failed", "run_id": run_id, "error": str(exc)}
 
 
+async def _ensure_keyword_plan(keyword: dict[str, Any], client: OllamaClient) -> dict[str, Any]:
+    term = keyword["term"]
+    existing = db.json_loads(keyword.get("query_plan"), {})
+    if isinstance(existing, dict) and existing.get("required_anchors") and existing.get("search_queries"):
+        return validate_plan(term, existing)
+    try:
+        raw = await client.build_query_plan(term)
+        plan = validate_plan(term, raw)
+    except Exception:
+        plan = deterministic_plan(term)
+    db.save_keyword_plan(keyword["id"], plan)
+    return plan
+
+
+def _weak_judgement(lexical: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    summary = (item.get("summary") or item.get("title") or "")[:120]
+    return {
+        "related": False,
+        "match_level": "weak",
+        "matched_anchors": lexical["matched_anchors"],
+        "missing_anchors": lexical["missing_anchors"],
+        "evidence": lexical["evidence"],
+        "content_summary": summary,
+        "match_reason": lexical["reason"],
+        "confusable": bool(lexical["confusable_hits"]),
+        "relevance": 30,
+        "fake_risk": 50,
+        "credibility": 50,
+        "sensational": False,
+        "claim_type": "unknown",
+        "verdict_reason": "仅命中泛化锚点，入库不告警",
+        "summary": summary,
+    }
+
+
+def _match_message(match_level: str, matched: list[str], evidence: str, reason: str) -> str:
+    labels = {"exact": "精确匹配", "strong": "强匹配", "partial": "部分匹配", "weak": "弱相关"}
+    parts = [labels.get(match_level, match_level)]
+    if matched:
+        parts.append("命中 " + " / ".join(matched))
+    if evidence:
+        parts.append(f"证据：{evidence}")
+    if reason:
+        parts.append(reason)
+    return " · ".join(parts)[:300]
+
+
 async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
     if KEYWORD_LOCK.locked():
         return {"status": "skipped", "reason": "关键词检查正在运行"}
@@ -548,13 +604,29 @@ async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
         keywords = db.list_keywords(enabled_only=True)
         fetched = 0
         alerts_created = 0
+        filtered_none = 0
+        weak_saved = 0
         errors: list[str] = []
         try:
+            client = OllamaClient(
+                settings.get("ollama_url", "http://localhost:11434"),
+                settings.get("ollama_model", "qwen3:8b"),
+            )
+            plans = []
+            for keyword in keywords:
+                try:
+                    plans.append(await _ensure_keyword_plan(keyword, client))
+                except Exception as exc:
+                    errors.append(f"{keyword['term']} / 查询计划: {exc}")
+                    plans.append(deterministic_plan(keyword["term"]))
             fetch_results = await asyncio.gather(
-                *[fetch_keyword_sources(keyword["term"], settings) for keyword in keywords],
+                *[
+                    fetch_keyword_sources(keyword["term"], settings, plan)
+                    for keyword, plan in zip(keywords, plans)
+                ],
                 return_exceptions=True,
             )
-            for keyword, result in zip(keywords, fetch_results):
+            for keyword, plan, result in zip(keywords, plans, fetch_results):
                 if isinstance(result, Exception):
                     errors.append(f"{keyword['term']}: {result}")
                     continue
@@ -565,34 +637,90 @@ async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
                 if not candidates:
                     db.touch_keyword(keyword["id"])
                     continue
-                client = OllamaClient(
-                    settings.get("ollama_url", "http://localhost:11434"),
-                    settings.get("ollama_model", "qwen3:8b"),
+
+                lexical_results = [
+                    evaluate_text(plan, item.get("title") or "", item.get("summary") or "")
+                    for item in candidates
+                ]
+                ai_indices = [
+                    index
+                    for index, lexical in enumerate(lexical_results)
+                    if lexical["match_level"] in {"partial", "strong", "exact"}
+                ]
+                ai_candidates = [candidates[index] for index in ai_indices]
+                judgements = (
+                    await client.judge_keyword_items(keyword["term"], ai_candidates, plan)
+                    if ai_candidates
+                    else []
                 )
-                judgements = await client.judge_keyword_items(keyword["term"], candidates)
+                judgement_by_index = dict(zip(ai_indices, judgements))
+                current_plan_hash = plan_hash(plan)
                 alert_candidates: list[dict[str, Any]] = []
                 threshold = float(settings.get("relevance_threshold", 55))
-                for item, judgement in zip(candidates, judgements):
-                    if not judgement.get("related") or float(judgement.get("relevance") or 0) < threshold:
+
+                for index, item in enumerate(candidates):
+                    lexical = lexical_results[index]
+                    if lexical["match_level"] == "none":
+                        filtered_none += 1
                         continue
+                    if lexical["match_level"] == "weak":
+                        judgement = _weak_judgement(lexical, item)
+                        weak_saved += 1
+                    else:
+                        judgement = judgement_by_index.get(index) or _weak_judgement(lexical, item)
+                    final_level = merged_level(lexical["match_level"], judgement.get("match_level") or "none")
+                    if final_level == "none":
+                        filtered_none += 1
+                        continue
+                    related = is_alertable(final_level)
+                    evidence = judgement.get("evidence") or lexical["evidence"]
+                    if evidence:
+                        haystack = f'{item.get("title") or ""} {item.get("summary") or ""}'.casefold()
+                        if evidence.casefold() not in haystack:
+                            evidence = lexical["evidence"]
+                    matched = lexical["matched_anchors"] or judgement.get("matched_anchors") or []
+                    missing = lexical["missing_anchors"] or judgement.get("missing_anchors") or []
+                    match_reason = judgement.get("match_reason") or lexical["reason"]
+                    content_summary = (
+                        judgement.get("content_summary")
+                        or judgement.get("summary")
+                        or item.get("summary")
+                        or item.get("title")
+                        or ""
+                    )[:160]
+                    relevance = min(
+                        float(judgement.get("relevance") or 0),
+                        relevance_cap(final_level),
+                    )
+                    if final_level == "exact":
+                        relevance = max(relevance, 90)
+                    elif final_level == "strong":
+                        relevance = max(relevance, 80)
+                    elif final_level == "weak":
+                        relevance = min(relevance, 30)
+                    judgement["match_level"] = final_level
+                    judgement["related"] = related
+                    judgement["matched_anchors"] = matched
+                    judgement["missing_anchors"] = missing
+                    judgement["evidence"] = evidence
+                    judgement["match_reason"] = match_reason
+                    judgement["content_summary"] = content_summary
+                    judgement["relevance"] = relevance
+                    judgement["summary"] = content_summary or judgement.get("summary") or ""
+
                     evaluation = evaluate_keyword_credibility(item, judgement)
                     level = {
                         "verified": "critical",
                         "likely": "warning",
                     }.get(evaluation["verdict"], "info")
-                    message = (
-                        f"{judgement.get('verdict_reason') or ''} "
-                        f"| AI 相关度 {int(judgement.get('relevance', 0))}"
-                    ).strip()
                     article_id = item.get("existing_id")
                     if article_id:
                         existing = db.get_article(int(article_id))
                         if not existing:
                             continue
-                        matched = list(existing.get("matched_keywords") or [])
-                        if keyword["term"] in matched:
-                            continue
-                        matched.append(keyword["term"])
+                        matched_keywords = list(existing.get("matched_keywords") or [])
+                        if keyword["term"] not in matched_keywords:
+                            matched_keywords.append(keyword["term"])
                         new_credibility = max(
                             float(existing.get("credibility") or 0), evaluation["credibility"]
                         )
@@ -605,14 +733,15 @@ async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
                         db.update_article(
                             existing["id"],
                             {
-                                "matched_keywords": matched,
+                                "matched_keywords": matched_keywords,
                                 "credibility": new_credibility,
                                 "verdict": new_verdict,
-                                "verdict_reason": evaluation["verdict_reason"],
+                                "verdict_reason": (
+                                    f"{evaluation['verdict_reason']} · {match_reason}"
+                                )[:300],
                             },
                         )
-                        existing = db.get_article(existing["id"])
-                        article = existing
+                        article = db.get_article(existing["id"])
                     else:
                         article = {
                             "url": item["url"],
@@ -624,11 +753,13 @@ async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
                             "fetched_at": db.now_iso(),
                             "scope_names": [],
                             "tags": [],
-                            "relevance": judgement.get("relevance", 0),
+                            "relevance": relevance,
                             "credibility": evaluation["credibility"],
                             "verdict": evaluation["verdict"],
-                            "verdict_reason": evaluation["verdict_reason"],
-                            "ai_summary": judgement.get("summary") or "",
+                            "verdict_reason": (
+                                f"{evaluation['verdict_reason']} · {match_reason}"
+                            )[:300],
+                            "ai_summary": content_summary,
                             "claim_type": judgement.get("claim_type", "unknown"),
                             "sensational": judgement.get("sensational", False),
                             "matched_keywords": [keyword["term"]],
@@ -645,12 +776,31 @@ async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
                         article = db.get_article(article_id)
                     if not article:
                         continue
+
+                    db.upsert_keyword_match(
+                        article["id"],
+                        keyword["term"],
+                        final_level,
+                        matched,
+                        missing,
+                        evidence,
+                        match_reason,
+                        content_summary,
+                        item.get("query_used", ""),
+                        current_plan_hash,
+                        relevance,
+                        float(article.get("credibility") or 0),
+                    )
+                    if not related or relevance < threshold:
+                        continue
+                    if db.alert_exists(article["id"], keyword["term"]):
+                        continue
                     alert_candidates.append(
                         {
                             "article": article,
                             "level": level,
-                            "message": message,
-                            "relevance": float(judgement.get("relevance") or 0),
+                            "message": _match_message(final_level, matched, evidence, match_reason),
+                            "relevance": relevance,
                             "credibility": float(article.get("credibility") or 0),
                         }
                     )
@@ -684,6 +834,8 @@ async def run_keyword_check(trigger: str = "manual") -> dict[str, Any]:
                 "run_id": run_id,
                 "fetched": fetched,
                 "alerts": alerts_created,
+                "filtered": filtered_none,
+                "weak": weak_saved,
                 "errors": errors[:10],
             }
             broker.publish("keywords", result)

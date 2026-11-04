@@ -41,6 +41,7 @@ class RawItem:
     points: int = 0
     source_tier: str = "media"
     content_kind: str = "news"
+    query_used: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -55,6 +56,7 @@ class RawItem:
             "points": self.points,
             "source_tier": self.source_tier,
             "content_kind": self.content_kind,
+            "query_used": self.query_used,
         }
 
 
@@ -617,21 +619,41 @@ async def fetch_scope_sources(
 
 
 async def fetch_keyword_sources(
-    keyword: str, settings: dict[str, Any]
+    keyword: str, settings: dict[str, Any], plan: dict[str, Any] | None = None
 ) -> tuple[list[RawItem], list[str]]:
     freshness = int(settings.get("keyword_freshness_hours", 48))
-    tasks = [
-        fetch_google_news(keyword, 10, freshness, when="3d"),
-        fetch_bing_news(keyword, 6, freshness),
-        fetch_hn(keyword, 6, freshness),
-    ]
+    queries = []
+    if isinstance(plan, dict):
+        queries = [str(item).strip() for item in plan.get("search_queries") or [] if str(item).strip()]
+    if not queries:
+        queries = [keyword]
+    queries = queries[:5]
+
+    tasks = []
+    labels: list[tuple[str, str]] = []
+    for index, query in enumerate(queries):
+        tasks.append(
+            fetch_google_news(query, 8 if index == 0 else 4, freshness, when="3d")
+        )
+        labels.append(("Google News", query))
+        tasks.append(fetch_bing_news(query, 5 if index == 0 else 3, freshness))
+        labels.append(("Bing News", query))
+    tasks.append(fetch_hn(keyword, 6, freshness))
+    labels.append(("Hacker News", keyword))
+
     results = await asyncio.gather(*tasks, return_exceptions=True)
     items: list[RawItem] = []
     errors: list[str] = []
-    labels = ["Google News", "Bing News", "Hacker News"]
-    for label, result in zip(labels, results):
+    seen: set[str] = set()
+    for (label, query), result in zip(labels, results):
         if isinstance(result, Exception):
-            errors.append(f"{keyword} / {label}: {result}")
-        else:
-            items.extend(result)
+            errors.append(f"{keyword} / {label} / {query}: {result}")
+            continue
+        for item in result:
+            item.query_used = query
+            key = canonicalize_url(item.url) or item.url
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(item)
     return items, errors

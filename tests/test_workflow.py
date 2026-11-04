@@ -9,6 +9,9 @@ class FakeOllama:
     def __init__(self, *args, **kwargs):
         pass
 
+    async def build_query_plan(self, keyword):
+        return {}
+
     async def classify_items(self, items, scopes):
         return [
             {
@@ -23,10 +26,16 @@ class FakeOllama:
             for _ in items
         ]
 
-    async def judge_keyword_items(self, keyword, items):
+    async def judge_keyword_items(self, keyword, items, plan=None):
         return [
             {
                 "related": True,
+                "match_level": "strong",
+                "matched_anchors": [keyword],
+                "missing_anchors": [],
+                "evidence": item.get("title", ""),
+                "content_summary": "关键词命中摘要",
+                "match_reason": "标题命中关键词",
                 "relevance": 92,
                 "fake_risk": 5,
                 "credibility": 92,
@@ -35,7 +44,7 @@ class FakeOllama:
                 "verdict_reason": "官方发布",
                 "summary": "关键词命中摘要",
             }
-            for _ in items
+            for item in items
         ]
 
 
@@ -107,7 +116,7 @@ def test_run_keyword_check_creates_alert(temp_db, monkeypatch):
 
     db.create_keyword("Claude Code")
 
-    async def fake_keyword_sources(keyword, settings):
+    async def fake_keyword_sources(keyword, settings, plan=None):
         return (
             [
                 RawItem(
@@ -135,13 +144,107 @@ def test_run_keyword_check_creates_alert(temp_db, monkeypatch):
     assert alerts[0]["keyword"] == "Claude Code"
 
 
+def test_keyword_query_expansion_filters_unrelated_content(temp_db, monkeypatch):
+    import app.pipeline as pipeline
+
+    db.create_keyword("Claude Sonnet 4.6")
+
+    async def fake_keyword_sources(keyword, settings, plan=None):
+        return (
+            [
+                RawItem(
+                    title="Anthropic announces Claude Sonnet 4.6",
+                    url="https://openai.com/index/sonnet",
+                    summary="New model release",
+                    source="OpenAI News",
+                    source_domain="openai.com",
+                    published_at=db.now_iso(),
+                ),
+                RawItem(
+                    title="OpenClaw is a new agent",
+                    url="https://example.com/openclaw",
+                    summary="A separate open-source agent project",
+                    source="Example",
+                    source_domain="example.com",
+                    published_at=db.now_iso(),
+                ),
+                RawItem(
+                    title="Claude Code update",
+                    url="https://example.com/claude-code",
+                    summary="A coding tool update",
+                    source="Example",
+                    source_domain="example.com",
+                    published_at=db.now_iso(),
+                ),
+                RawItem(
+                    title="Claude Sonnet gets an update",
+                    url="https://example.com/sonnet-update",
+                    summary="The model family gets a minor update",
+                    source="Example",
+                    source_domain="example.com",
+                    published_at=db.now_iso(),
+                ),
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "fetch_keyword_sources", fake_keyword_sources)
+    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllama)
+
+    result = asyncio.run(run_keyword_check("test"))
+    assert result["status"] == "success"
+    assert result["alerts"] == 1
+    assert result["filtered"] == 1
+    assert result["weak"] == 1
+
+    topics = db.list_topics(include_keyword_only=True, limit=100)
+    levels = {
+        topic["title"]: (topic.get("best_match") or {}).get("match_level")
+        for topic in topics
+    }
+    assert "OpenClaw is a new agent" not in levels
+    assert levels["Claude Code update"] == "weak"
+    assert levels["Claude Sonnet gets an update"] == "partial"
+    assert levels["Anthropic announces Claude Sonnet 4.6"] == "exact"
+
+    alerts = db.list_alerts()
+    assert len(alerts) == 1
+    assert alerts[0]["match_level"] == "exact"
+    assert "Claude" in alerts[0]["matched_anchors"]
+    assert alerts[0]["match_evidence"]
+
+
+def test_keyword_repeat_run_does_not_consume_alert_slots(temp_db, monkeypatch):
+    import app.pipeline as pipeline
+
+    db.create_keyword("Claude")
+    state = {"items": [RawItem(title="Claude update one", url="https://example.com/one", source="Example", source_domain="example.com", published_at=db.now_iso())]}
+
+    async def fake_keyword_sources(keyword, settings, plan=None):
+        return (list(state["items"]), [])
+
+    monkeypatch.setattr(pipeline, "fetch_keyword_sources", fake_keyword_sources)
+    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllama)
+
+    first = asyncio.run(run_keyword_check("test"))
+    assert first["alerts"] == 1
+    state["items"].append(
+        RawItem(title="Claude update two", url="https://example.com/two", source="Example", source_domain="example.com", published_at=db.now_iso())
+    )
+    second = asyncio.run(run_keyword_check("test"))
+    assert second["alerts"] == 1
+    alerts = db.list_alerts()
+    assert len(alerts) == 2
+    assert {alert["title"] for alert in alerts} == {"Claude update one", "Claude update two"}
+
+
 def test_keyword_alert_cap(temp_db, monkeypatch):
     import app.pipeline as pipeline
 
     db.save_settings({"max_alerts_per_keyword_run": 1})
     db.create_keyword("Claude")
 
-    async def fake_keyword_sources(keyword, settings):
+    async def fake_keyword_sources(keyword, settings, plan=None):
         return (
             [
                 RawItem(

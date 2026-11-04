@@ -262,6 +262,8 @@ def topics_impl(args):
             "has_keyword": str(args.has_keyword).lower(),
             "single_source": str(args.single_source).lower(),
         }
+        if args.match_level:
+            params["match_level"] = args.match_level
         if scopes:
             params["scope"] = scopes
         if args.verdict:
@@ -306,7 +308,15 @@ def topics_impl(args):
         time_field=args.time_field,
         sort=args.sort,
         has_keyword=args.has_keyword,
+        match_levels=args.match_level,
     )
+
+
+def _topic_line(item):
+    match = item.get("best_match") or {}
+    level = match.get("match_level")
+    prefix = f"{level} " if level else ""
+    return f"[{prefix}{item['verdict']} {round(float(item['credibility']))}] {item['title']}\n    {item['url']}"
 
 
 def cmd_topics(args):
@@ -314,10 +324,7 @@ def cmd_topics(args):
     output(
         {"ok": True, "count": len(items), "items": items},
         args.json,
-        [
-            f"[{item['verdict']} {round(float(item['credibility']))}] {item['title']}\n    {item['url']}"
-            for item in items
-        ],
+        [_topic_line(item) for item in items],
     )
 
 
@@ -368,10 +375,7 @@ def cmd_scan(args):
             "items": items,
         },
         args.json,
-        [
-            f"[{item['verdict']} {round(float(item['credibility']))}] {item['title']}\n    {item['url']}"
-            for item in items
-        ],
+        [_topic_line(item) for item in items],
     )
 
 
@@ -496,6 +500,7 @@ def add_topic_filter_args(parser, default_hours=168, default_limit=20):
     parser.add_argument("--single-source", action="store_true", default=False)
     parser.add_argument("--keyword", action="append")
     parser.add_argument("--has-keyword", action="store_true", default=False)
+    parser.add_argument("--match-level", action="append", choices=["exact", "strong", "partial", "weak"])
     parser.add_argument("--q")
     parser.add_argument("--time-field", choices=["published", "fetched"], default="published")
     parser.add_argument("--sort", choices=["composite", "newest", "fetched", "credibility", "relevance", "sources"], default="composite")
