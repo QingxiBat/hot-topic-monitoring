@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3eddf">
+  <title>热点雷达 · SignalRadar</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div class="ambient ambient-left" aria-hidden="true"></div>
+  <div class="ambient ambient-right" aria-hidden="true"></div>
+
+  <header class="masthead">
+    <div class="masthead-bar">
+      <span class="edition">VOL. 01 · 独立信号观察</span>
+      <span class="today" id="todayLabel"></span>
+      <div class="bar-actions">
+        <button class="text-btn" id="notifyBtn" type="button">桌面通知</button>
+        <button class="text-btn" id="settingsBtn" type="button">设置手记</button>
+      </div>
+    </div>
+
+    <div class="brand-grid">
+      <div class="brand-block">
+        <p class="eyebrow">AI 热点 · 实时监测</p>
+        <h1 class="brand">
+          <span class="brand-cn">热点雷达</span>
+          <span class="brand-en">SIGNAL<br>RADAR</span>
+        </h1>
+      </div>
+      <div class="brand-note">
+        <p class="tagline">在喧嚣抵达之前，<br>先听见信号。</p>
+        <div class="status-line">
+          <span class="led" id="statusLed" aria-hidden="true"></span>
+          <span id="statusText">正在校准频率…</span>
+        </div>
+        <div class="signal-bars" id="signalBars" aria-hidden="true">
+          <i style="--h:28%"></i><i style="--h:52%"></i><i style="--h:74%"></i><i style="--h:44%"></i><i style="--h:88%"></i>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="ticker" aria-label="最新信号">
+    <span class="ticker-label">号外</span>
+    <div class="ticker-window"><div class="ticker-track" id="tickerTrack">正在监听第一声信号…</div></div>
+  </div>
+
+  <nav class="scope-nav" aria-label="监控范围">
+    <span class="nav-label">本期范围</span>
+    <div class="scope-tabs" id="scopeTabs"></div>
+    <button class="scope-add" id="addScopeBtn" type="button">+ 新范围</button>
+  </nav>
+
+  <main class="layout">
+    <section class="wire" aria-labelledby="wireTitle">
+      <div class="section-head">
+        <div class="section-title">
+          <span class="section-no">01</span>
+          <h2 id="wireTitle">今日热点 <em>THE WIRE</em></h2>
+        </div>
+        <div class="wire-tools">
+          <label class="select-wrap">
+            <span>可信度</span>
+            <select id="verdictFilter">
+              <option value="">全部</option>
+              <option value="verified">已核实</option>
+              <option value="likely">可信</option>
+              <option value="unverified">待核实</option>
+              <option value="suspicious">存疑</option>
+            </select>
+          </label>
+          <button class="ink-btn" id="refreshBtn" type="button">采集新信号</button>
+        </div>
+      </div>
+
+      <div id="topicList" class="topic-list"></div>
+      <div id="wireEmpty" class="empty-state" hidden>
+        <p class="empty-big">等待第一声信号</p>
+        <p class="empty-small">编辑部已就位。点击「采集新信号」，或稍等自动巡检。</p>
+      </div>
+      <div class="wire-foot">
+        <button class="load-more" id="loadMoreBtn" type="button" hidden>继续翻阅</button>
+        <span class="wire-count" id="wireCount"></span>
+      </div>
+    </section>
+
+    <aside class="rail" aria-label="关键词与电报">
+      <section class="radar-card">
+        <div class="rail-head">
+          <span class="section-no">02</span>
+          <h2>关键词哨兵 <em>WATCHLIST</em></h2>
+          <button class="mini-btn" id="keywordCheckBtn" type="button">立即巡检</button>
+        </div>
+        <div class="radar" aria-hidden="true">
+          <span class="radar-dir dir-n">N</span>
+          <span class="radar-dir dir-e">E</span>
+          <span class="radar-dir dir-s">S</span>
+          <span class="radar-dir dir-w">W</span>
+          <div class="radar-ring ring-1"></div>
+          <div class="radar-ring ring-2"></div>
+          <div class="radar-ring ring-3"></div>
+          <div class="radar-cross"></div>
+          <div class="radar-sweep"></div>
+          <div class="radar-center"></div>
+          <div class="radar-pips" id="radarPips"></div>
+        </div>
+        <p class="radar-caption">每个光点是一枚正在值守的关键词</p>
+        <form class="keyword-form" id="keywordForm">
+          <input id="keywordInput" type="text" maxlength="80" placeholder="输入关键词，如 Claude Code" autocomplete="off" aria-label="要监控的关键词">
+          <button type="submit">布防</button>
+        </form>
+        <ul class="keyword-list" id="keywordList"></ul>
+      </section>
+
+      <section class="alerts-card">
+        <div class="rail-head">
+          <span class="section-no">03</span>
+          <h2>电报 <em>ALERTS</em></h2>
+          <button class="mini-btn" id="readAllBtn" type="button">全部已读</button>
+        </div>
+        <ul class="alert-list" id="alertList"></ul>
+        <div class="mini-empty" id="alertEmpty">尚无电报。布防关键词后，信号抵达时会在这里响起。</div>
+      </section>
+
+      <section class="memo-card">
+        <p class="memo-label">编辑部备忘</p>
+        <p>高可信信号会写入 Webhook；存疑内容只入库、不推送。AI 判断仅作参考，点开原文再下结论。</p>
+        <p class="memo-status" id="ollamaStatus">正在检查本地模型…</p>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <span>SignalRadar · 本地优先 · qwen3:8b</span>
+    <span id="runStatus">尚未采集</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <dialog class="memo-dialog" id="settingsDialog">
+    <form method="dialog" class="dialog-head">
+      <div>
+        <span class="dialog-kicker">EDITOR'S NOTE</span>
+        <h2>设置手记</h2>
+      </div>
+      <button class="dialog-close" value="close" aria-label="关闭设置">×</button>
+    </form>
+
+    <div class="dialog-body">
+      <section class="memo-section">
+        <h3><span>01</span>监控范围</h3>
+        <p class="hint">范围决定自动采集的主题。查询词可用空格分隔多个关键词。</p>
+        <div class="scope-manage" id="scopeManage"></div>
+        <form class="inline-form" id="scopeForm">
+          <input id="scopeName" type="text" maxlength="60" placeholder="范围名称，如 AI 芯片" required>
+          <input id="scopeQuery" type="text" maxlength="300" placeholder="查询词，如 AI chip NVIDIA 芯片" required>
+          <button type="submit" class="outline-btn">添加范围</button>
+        </form>
+      </section>
+
+      <section class="memo-section">
+        <h3><span>02</span>节奏与门槛</h3>
+        <div class="field-grid">
+          <label class="field">
+            <span>热点采集间隔（分钟）</span>
+            <input id="collectInterval" type="number" min="5" max="1440" step="1">
+          </label>
+          <label class="field">
+            <span>关键词巡检间隔（分钟）</span>
+            <input id="keywordInterval" type="number" min="2" max="1440" step="1">
+          </label>
+          <label class="field">
+            <span>关键词相关度门槛</span>
+            <div class="range-row"><input id="relevanceThreshold" type="range" min="0" max="100" step="1"><output id="relevanceOut">55</output></div>
+          </label>
+          <label class="field">
+            <span>Webhook 最低可信度</span>
+            <div class="range-row"><input id="alertCredibility" type="range" min="0" max="100" step="1"><output id="alertCredOut">60</output></div>
+          </label>
+          <label class="field">
+            <span>单关键词单轮最多电报</span>
+            <input id="maxAlerts" type="number" min="1" max="20" step="1">
+          </label>
+          <label class="check-field">
+            <input id="autoCollect" type="checkbox">
+            <span>保持自动采集</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="memo-section">
+        <h3><span>03</span>本地模型与推送</h3>
+        <div class="field-grid">
+          <label class="field">
+            <span>Ollama 地址</span>
+            <input id="ollamaUrl" type="url" placeholder="http://localhost:11434">
+          </label>
+          <label class="field">
+            <span>模型名称</span>
+            <input id="ollamaModel" type="text" placeholder="qwen3:8b">
+          </label>
+          <label class="field wide">
+            <span>Webhook 地址（飞书 / 企业微信 / 钉钉 / 通用）</span>
+            <input id="webhookUrl" type="url" placeholder="https://...">
+          </label>
+          <label class="field">
+            <span>Webhook 类型</span>
+            <select id="webhookType">
+              <option value="auto">自动识别</option>
+              <option value="feishu">飞书</option>
+              <option value="wecom">企业微信</option>
+              <option value="dingtalk">钉钉</option>
+              <option value="generic">通用 JSON</option>
+            </select>
+          </label>
+          <label class="check-field">
+            <input id="browserNotify" type="checkbox">
+            <span>允许浏览器桌面通知</span>
+          </label>
+        </div>
+        <div class="dialog-inline-actions">
+          <button class="outline-btn" id="testWebhookBtn" type="button">测试 Webhook</button>
+          <button class="outline-btn" id="healthBtn" type="button">检查模型连接</button>
+          <span class="dialog-status" id="dialogStatus"></span>
+        </div>
+      </section>
+    </div>
+
+    <div class="dialog-actions">
+      <span class="save-note">修改会在下一次巡检生效</span>
+      <button class="primary-btn" id="saveSettingsBtn" type="button">保存手记</button>
+    </div>
+  </dialog>
+</body>
+</html>

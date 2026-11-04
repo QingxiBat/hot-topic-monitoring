@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.log
+.idea/
+.jbeval/
+node_modules/
+.DS_Store
+
+# 本地私有配置，不提交
+opencode.json
+prompt.md
+skills-lock.json
+.claude/
+
+# 仅用于开发的第三方技能，不随项目运行分发
+.agents/skills/find-skills/
+.agents/skills/ui-ux-pro-max/
+.agents/skills/skill-creator/
