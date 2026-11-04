@@ -1,12 +1,13 @@
 import asyncio
-import json
+from collections.abc import AsyncIterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -286,30 +287,22 @@ def feeds():
     return db.list_feeds(enabled_only=False)
 
 
-@app.get("/api/stream")
-async def stream(request: Request):
-    async def event_generator():
-        queue = broker.subscribe()
-        try:
-            yield "retry: 3000\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                data = json.dumps(payload["data"], ensure_ascii=False)
-                yield f'event: {payload["event"]}\ndata: {data}\n\n'
-        finally:
-            broker.unsubscribe(queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+@app.get("/api/stream", response_class=EventSourceResponse)
+async def stream(request: Request) -> AsyncIterable[ServerSentEvent]:
+    queue = broker.subscribe()
+    try:
+        yield ServerSentEvent(comment="connected", retry=3000)
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ServerSentEvent(comment="ping")
+                continue
+            yield ServerSentEvent(data=payload["data"], event=payload["event"])
+    finally:
+        broker.unsubscribe(queue)
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

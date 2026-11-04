@@ -2,6 +2,11 @@
 
 本地优先的 AI 热点监测工具。自动抓取公开新闻与 AI 官方博客，用本地 Ollama `qwen3:8b` 做分类、去重、可信度判断，并在关键词命中时发送站内 / 浏览器 / Webhook 通知。
 
+## 文档
+
+- [需求文档](docs/01-需求文档.md)
+- [技术方案（含 MCP 最新资料核验）](docs/02-技术方案.md)
+
 ## 功能
 
 - **关键词哨兵**：输入关键词，定时巡检 Google News、Bing News、Hacker News；AI 判断是否真的相关，并识别标题党、同名蹭热度、旧闻翻炒等风险。
@@ -111,6 +116,7 @@ app/
   scheduler.py   APScheduler 定时任务
   notifier.py    SSE 广播与 Webhook
   static/        响应式前端
+docs/            需求文档与技术方案
 tests/           pytest 测试
 .agents/skills/hot-topic-radar/
 ```
