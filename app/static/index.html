@@ -64,18 +64,105 @@
           <h2 id="wireTitle">今日热点 <em>THE WIRE</em></h2>
         </div>
         <div class="wire-tools">
+          <button class="filter-toggle" id="filterToggle" type="button" aria-expanded="false" aria-controls="filterPanel">
+            筛选 <span class="filter-badge" id="filterBadge" hidden>0</span>
+          </button>
           <label class="select-wrap">
-            <span>可信度</span>
-            <select id="verdictFilter">
-              <option value="">全部</option>
-              <option value="verified">已核实</option>
-              <option value="likely">可信</option>
-              <option value="unverified">待核实</option>
-              <option value="suspicious">存疑</option>
+            <span>排序</span>
+            <select id="sortSelect">
+              <option value="composite">综合优先</option>
+              <option value="newest">最新发布</option>
+              <option value="fetched">最新入库</option>
+              <option value="credibility">可信度优先</option>
+              <option value="relevance">相关度优先</option>
+              <option value="sources">多源印证优先</option>
             </select>
           </label>
           <button class="ink-btn" id="refreshBtn" type="button">采集新信号</button>
         </div>
+      </div>
+
+      <div class="filter-desk" id="filterDesk">
+        <div class="preset-tabs" id="presetTabs" aria-label="编辑预设"></div>
+        <div class="quick-chips" id="quickChips" aria-label="快捷筛选"></div>
+        <div class="filter-panel" id="filterPanel" hidden>
+          <div class="filter-grid">
+            <label class="filter-field">
+              <span>时间窗</span>
+              <select id="timeHours">
+                <option value="24">近 24 小时</option>
+                <option value="72">近 3 天</option>
+                <option value="168">近 7 天</option>
+                <option value="720">近 30 天</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span>时间基准</span>
+              <select id="timeField">
+                <option value="published">发布时间</option>
+                <option value="fetched">入库时间</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span>多源印证</span>
+              <select id="minSources">
+                <option value="">不限</option>
+                <option value="2">至少 2 家</option>
+                <option value="3">至少 3 家</option>
+                <option value="single">仅单源</option>
+              </select>
+            </label>
+            <label class="filter-field">
+              <span>指定关键词</span>
+              <select id="keywordFilter">
+                <option value="">全部关键词</option>
+              </select>
+            </label>
+            <label class="filter-field wide">
+              <span>全文搜索</span>
+              <input id="searchInput" type="search" maxlength="200" placeholder="标题、摘要、AI 摘要、标签">
+            </label>
+            <div class="filter-field range-field">
+              <span>可信度</span>
+              <input id="minCredibility" type="number" min="0" max="100" placeholder="最低">
+              <em>—</em>
+              <input id="maxCredibility" type="number" min="0" max="100" placeholder="最高">
+            </div>
+            <div class="filter-field range-field">
+              <span>相关度</span>
+              <input id="minRelevance" type="number" min="0" max="100" placeholder="最低">
+              <em>—</em>
+              <input id="maxRelevance" type="number" min="0" max="100" placeholder="最高">
+            </div>
+            <fieldset class="filter-field">
+              <legend>可信等级</legend>
+              <div class="check-grid" id="verdictOptions"></div>
+            </fieldset>
+            <fieldset class="filter-field">
+              <legend>来源层级</legend>
+              <div class="check-grid" id="tierOptions"></div>
+            </fieldset>
+            <fieldset class="filter-field">
+              <legend>内容类型</legend>
+              <div class="check-grid" id="kindOptions"></div>
+            </fieldset>
+            <div class="filter-field check-stack">
+              <label class="check-field">
+                <input id="hasKeyword" type="checkbox">
+                <span>只看关键词命中</span>
+              </label>
+              <label class="check-field">
+                <input id="includeKeywordOnly" type="checkbox">
+                <span>包含仅关键词入库内容</span>
+              </label>
+            </div>
+          </div>
+          <div class="filter-panel-actions">
+            <button class="text-btn" id="resetFilters" type="button">清空全部</button>
+            <button class="outline-btn" id="applyFilters" type="button">应用筛选</button>
+          </div>
+        </div>
+        <div class="active-filters" id="activeFilters"></div>
       </div>
 
       <div id="topicList" class="topic-list"></div>

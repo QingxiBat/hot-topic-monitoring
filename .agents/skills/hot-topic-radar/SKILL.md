@@ -63,9 +63,18 @@ python scripts/radar.py --json topics --scope "AI 编程" --hours 72 --limit 10
 
 Useful flags:
 
-- `--scope "大模型"` — filter by a configured scope.
-- `--hours 168` — look back up to 7 days.
-- `--verdict verified|likely|unverified|suspicious` — filter by credibility.
+- `--scope "大模型"` — filter by a configured scope; repeat for multiple scopes.
+- `--hours 168` — look back up to 7 days; `--time-field fetched` uses intake time.
+- `--verdict verified|likely|unverified|suspicious` — filter by credibility; repeat for multiple values.
+- `--tier official|release|research|media|community|heat` — filter by source tier; repeatable.
+- `--kind news|release|research|discussion|video|heat` — filter by content kind; repeatable.
+- `--min-credibility 75 --max-credibility 95` — credibility range.
+- `--min-relevance 60` / `--max-relevance 90` — relevance range.
+- `--min-sources 2` — require at least 2 independent domains; `--single-source` does the opposite.
+- `--keyword "Claude"` — filter by a matched keyword; repeatable.
+- `--has-keyword` — only items matched by a keyword watch.
+- `--q "Agent"` — search title, summary, AI summary, and tags.
+- `--sort composite|newest|fetched|credibility|relevance|sources` — default is `composite`.
 - `--include-keyword-only` — include articles found only by keyword watches.
 
 ### 3. Collect fresh hotspots
@@ -82,10 +91,10 @@ python scripts/radar.py --json collect --scope "AI 编程" --wait
 ### 4. Scan and return results in one step (recommended)
 
 ```bash
-python scripts/radar.py --json scan --scope "AI 编程" --limit 10 --hours 72
+python scripts/radar.py --json scan --scope "AI 编程" --limit 10 --hours 72 --sort composite
 ```
 
-Use `--no-collect` to only read existing results without contacting sources.
+`scan` accepts the same filter flags as `topics`. Use `--no-collect` to only read existing results without contacting sources.
 
 ### 5. Watch a keyword
 

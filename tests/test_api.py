@@ -5,9 +5,14 @@ def test_index_and_static(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "热点雷达" in response.text
+    assert 'id="filterToggle"' in response.text
+    assert 'id="sortSelect"' in response.text
     css = client.get("/static/style.css")
     assert css.status_code == 200
     assert "--paper" in css.text
+    js = client.get("/static/app.js")
+    assert js.status_code == 200
+    assert '"composite"' in js.text
 
 
 def test_dashboard_defaults(client):
@@ -123,9 +128,172 @@ def test_topic_scope_and_verdict_filter(client):
     )
     filtered = client.get("/api/topics?scope=AI%20%E7%BC%96%E7%A8%8B").json()["items"]
     assert len(filtered) == 1
+    multi_scope = client.get(
+        "/api/topics?scope=AI%20%E7%BC%96%E7%A8%8B&scope=%E5%A4%A7%E6%A8%A1%E5%9E%8B"
+    ).json()["items"]
+    assert len(multi_scope) == 2
     verified = client.get("/api/topics?verdict=verified").json()["items"]
     assert len(verified) == 1
     assert client.get("/api/topics?verdict=hacked").status_code == 400
+
+
+def test_topics_multi_filter_and_sort(client):
+    official = _insert_article(
+        url="https://example.com/official",
+        title="Official GPT release",
+        source_tier="official",
+        content_kind="release",
+        verdict="verified",
+        credibility=92,
+        relevance=80,
+    )
+    community = _insert_article(
+        url="https://example.com/community",
+        title="Community rumor",
+        source_tier="community",
+        content_kind="discussion",
+        verdict="unverified",
+        credibility=42,
+        relevance=55,
+        also_sources=["v2ex.com"],
+    )
+    research = _insert_article(
+        url="https://example.com/research",
+        title="Research paper benchmark",
+        source_tier="research",
+        content_kind="research",
+        verdict="likely",
+        credibility=72,
+        relevance=95,
+        tags=["LLM"],
+        also_sources=["arxiv.org"],
+    )
+
+    multi_verdict = client.get("/api/topics?verdict=verified&verdict=likely").json()["items"]
+    assert {item["id"] for item in multi_verdict} == {official, research}
+
+    multi_tier = client.get("/api/topics?tier=official&tier=community").json()["items"]
+    assert {item["id"] for item in multi_tier} == {official, community}
+
+    multi_kind = client.get("/api/topics?kind=release&kind=research").json()["items"]
+    assert {item["id"] for item in multi_kind} == {official, research}
+
+    credibility = client.get("/api/topics?sort=credibility").json()["items"]
+    assert credibility[0]["id"] == official
+
+    relevance = client.get("/api/topics?sort=relevance").json()["items"]
+    assert relevance[0]["id"] == research
+
+
+def test_topics_range_source_keyword_and_search(client):
+    single = _insert_article(
+        url="https://example.com/single",
+        title="Single source story",
+        source_tier="media",
+        credibility=65,
+        relevance=70,
+        verdict="unverified",
+    )
+    multi = _insert_article(
+        url="https://example.com/multi",
+        title="Claude Code launch",
+        source_tier="official",
+        credibility=88,
+        relevance=90,
+        verdict="verified",
+        also_sources=["openai.com", "theverge.com", "techcrunch.com"],
+        matched_keywords=["Claude"],
+        tags=["编程工具"],
+    )
+    low = _insert_article(
+        url="https://example.com/low",
+        title="Low score marketing",
+        source_tier="community",
+        credibility=30,
+        relevance=35,
+        verdict="suspicious",
+        also_sources=["bilibili.com"],
+    )
+
+    ranged = client.get("/api/topics?min_credibility=60&max_credibility=90").json()["items"]
+    assert {item["id"] for item in ranged} == {single, multi}
+
+    multi_only = client.get("/api/topics?min_sources=2").json()["items"]
+    assert [item["id"] for item in multi_only] == [multi]
+
+    single_only = client.get("/api/topics?single_source=true").json()["items"]
+    assert {item["id"] for item in single_only} == {single, low}
+
+    searched = client.get("/api/topics?q=Claude").json()["items"]
+    assert [item["id"] for item in searched] == [multi]
+
+    tagged = client.get("/api/topics?q=编程工具").json()["items"]
+    assert [item["id"] for item in tagged] == [multi]
+
+    keyworded = client.get("/api/topics?has_keyword=true").json()["items"]
+    assert [item["id"] for item in keyworded] == [multi]
+
+    specific = client.get("/api/topics?keyword=Claude").json()["items"]
+    assert [item["id"] for item in specific] == [multi]
+
+    source_sorted = client.get("/api/topics?sort=sources").json()["items"]
+    assert source_sorted[0]["id"] == multi
+
+    total = client.get("/api/topics?min_credibility=60").json()["total"]
+    assert total == 2
+
+
+def test_topics_default_composite_and_time_field(client):
+    from datetime import timedelta
+
+    now = db.now_utc()
+    official = _insert_article(
+        url="https://example.com/composite-official",
+        title="High priority official",
+        source_tier="official",
+        credibility=95,
+        relevance=90,
+        verdict="verified",
+        published_at=(now - timedelta(days=6)).isoformat(),
+    )
+    _insert_article(
+        url="https://example.com/composite-community",
+        title="Fresh community post",
+        source_tier="community",
+        credibility=50,
+        relevance=50,
+        verdict="unverified",
+        published_at=now.isoformat(),
+    )
+    composite = client.get("/api/topics").json()["items"]
+    assert composite[0]["id"] == official
+
+    old = _insert_article(
+        url="https://example.com/old-published",
+        title="Old published but newly fetched",
+        source_tier="media",
+        credibility=70,
+        relevance=70,
+        verdict="likely",
+        published_at="2020-01-01T00:00:00+00:00",
+        fetched_at=now.isoformat(),
+    )
+    default_ids = {item["id"] for item in client.get("/api/topics?limit=100").json()["items"]}
+    assert old not in default_ids
+    fetched_ids = {
+        item["id"]
+        for item in client.get("/api/topics?limit=100&time_field=fetched").json()["items"]
+    }
+    assert old in fetched_ids
+
+
+def test_topics_filter_validation(client):
+    assert client.get("/api/topics?sort=random").status_code == 400
+    assert client.get("/api/topics?time_field=unknown").status_code == 400
+    assert client.get("/api/topics?tier=unknown").status_code == 400
+    assert client.get("/api/topics?kind=unknown").status_code == 400
+    assert client.get("/api/topics?min_credibility=80&max_credibility=60").status_code == 400
+    assert client.get("/api/topics?single_source=true&min_sources=2").status_code == 400
 
 
 def test_alerts_join_and_mark_read(client):

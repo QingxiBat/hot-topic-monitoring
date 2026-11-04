@@ -5,6 +5,15 @@ from typing import Any
 
 from .config import DB_PATH, DATA_DIR, DEFAULT_FEEDS, DEFAULT_SCOPES, DEFAULT_SETTINGS
 
+TOPIC_SORTS = {"composite", "newest", "fetched", "credibility", "relevance", "sources"}
+TIME_FIELDS = {"published", "fetched"}
+
+SOURCE_COUNT_SQL = (
+    "CASE WHEN json_valid(also_sources) "
+    "THEN MAX(1, json_array_length(also_sources)) "
+    "ELSE CASE WHEN source_domain != '' THEN 1 ELSE 0 END END"
+)
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -128,6 +137,8 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_articles_fetched ON articles(fetched_at DESC);
             CREATE INDEX IF NOT EXISTS idx_articles_published ON articles(published_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_articles_credibility ON articles(credibility DESC);
+            CREATE INDEX IF NOT EXISTS idx_articles_relevance ON articles(relevance DESC);
             CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_article_keyword ON alerts(article_id, keyword);
             """
@@ -383,34 +394,230 @@ def update_article(article_id: int, updates: dict[str, Any]) -> None:
         conn.commit()
 
 
-def list_topics(
-    scope: str | None = None,
+def _as_filter_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = str(value).split(",")
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _topic_filter_clauses(
+    since_hours: int,
+    scope: str | list[str] | None,
+    verdict: str | list[str] | None,
+    include_keyword_only: bool,
+    tiers: str | list[str] | None,
+    kinds: str | list[str] | None,
+    min_credibility: float | None,
+    max_credibility: float | None,
+    min_relevance: float | None,
+    max_relevance: float | None,
+    min_sources: int | None,
+    single_source: bool,
+    keywords: str | list[str] | None,
+    query: str | None,
+    time_field: str,
+    has_keyword: bool,
+) -> tuple[list[str], list[Any]]:
+    since = (now_utc() - timedelta(hours=since_hours)).isoformat()
+    clauses: list[str] = []
+    values: list[Any] = []
+
+    if time_field == "fetched":
+        clauses.append("fetched_at >= ?")
+    else:
+        clauses.append("COALESCE(published_at, fetched_at) >= ?")
+    values.append(since)
+
+    if not include_keyword_only:
+        clauses.append("scope_names != '[]'")
+
+    scopes = _as_filter_list(scope)
+    if scopes:
+        clauses.append("(" + " OR ".join("scope_names LIKE ?" for _ in scopes) + ")")
+        values.extend(f'%"{item}"%' for item in scopes)
+
+    verdicts = _as_filter_list(verdict)
+    if verdicts:
+        clauses.append("verdict IN (" + ", ".join("?" for _ in verdicts) + ")")
+        values.extend(verdicts)
+
+    tier_values = _as_filter_list(tiers)
+    if tier_values:
+        clauses.append("source_tier IN (" + ", ".join("?" for _ in tier_values) + ")")
+        values.extend(tier_values)
+
+    kind_values = _as_filter_list(kinds)
+    if kind_values:
+        clauses.append("content_kind IN (" + ", ".join("?" for _ in kind_values) + ")")
+        values.extend(kind_values)
+
+    if min_credibility is not None:
+        clauses.append("credibility >= ?")
+        values.append(float(min_credibility))
+    if max_credibility is not None:
+        clauses.append("credibility <= ?")
+        values.append(float(max_credibility))
+    if min_relevance is not None:
+        clauses.append("relevance >= ?")
+        values.append(float(min_relevance))
+    if max_relevance is not None:
+        clauses.append("relevance <= ?")
+        values.append(float(max_relevance))
+
+    if single_source:
+        clauses.append(f"{SOURCE_COUNT_SQL} <= 1")
+    elif min_sources is not None:
+        clauses.append(f"{SOURCE_COUNT_SQL} >= ?")
+        values.append(max(1, int(min_sources)))
+
+    keyword_values = _as_filter_list(keywords)
+    if keyword_values:
+        clauses.append(
+            "(" + " OR ".join("matched_keywords LIKE ?" for _ in keyword_values) + ")"
+        )
+        values.extend(f'%"{item}"%' for item in keyword_values)
+    if has_keyword:
+        clauses.append("matched_keywords != '[]'")
+
+    if query:
+        term = f"%{_like_escape(query.strip())}%"
+        clauses.append(
+            "(title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
+            "OR ai_summary LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')"
+        )
+        values.extend([term, term, term, term])
+
+    return clauses, values
+
+
+def _topic_order_sql(sort: str) -> str:
+    if sort == "newest":
+        return "COALESCE(published_at, fetched_at) DESC, relevance DESC, id DESC"
+    if sort == "fetched":
+        return "fetched_at DESC, id DESC"
+    if sort == "credibility":
+        return "credibility DESC, COALESCE(published_at, fetched_at) DESC, id DESC"
+    if sort == "relevance":
+        return "relevance DESC, credibility DESC, COALESCE(published_at, fetched_at) DESC, id DESC"
+    if sort == "sources":
+        return (
+            f"{SOURCE_COUNT_SQL} DESC, credibility DESC, "
+            "COALESCE(published_at, fetched_at) DESC, id DESC"
+        )
+
+    recency_hours = (
+        "(julianday('now') - julianday(COALESCE(published_at, fetched_at))) * 24"
+    )
+    priority = (
+        "("
+        "credibility * 0.40 + relevance * 0.25 "
+        f"+ MIN({SOURCE_COUNT_SQL}, 4) * 5 "
+        "+ CASE source_tier "
+        "WHEN 'official' THEN 8 WHEN 'release' THEN 8 "
+        "WHEN 'research' THEN 5 WHEN 'media' THEN 2 ELSE 0 END "
+        f"+ CASE WHEN {recency_hours} <= 24 THEN 8 "
+        f"WHEN {recency_hours} <= 72 THEN 5 "
+        f"WHEN {recency_hours} <= 168 THEN 2 ELSE 0 END "
+        "- CASE WHEN sensational = 1 THEN 8 ELSE 0 END"
+        ")"
+    )
+    return (
+        f"{priority} DESC, COALESCE(published_at, fetched_at) DESC, "
+        "credibility DESC, id DESC"
+    )
+
+
+def query_topics(
+    scope: str | list[str] | None = None,
     limit: int = 40,
     offset: int = 0,
     since_hours: int = 168,
-    verdict: str | None = None,
+    verdict: str | list[str] | None = None,
     include_keyword_only: bool = False,
-) -> list[dict[str, Any]]:
-    since = (now_utc() - timedelta(hours=since_hours)).isoformat()
-    clauses = ["COALESCE(published_at, fetched_at) >= ?"]
-    values: list[Any] = [since]
-    if not include_keyword_only:
-        clauses.append("scope_names != '[]'")
-    if scope:
-        clauses.append("scope_names LIKE ?")
-        values.append(f'%"{scope}"%')
-    if verdict:
-        clauses.append("verdict = ?")
-        values.append(verdict)
-    sql = (
-        "SELECT * FROM articles WHERE "
-        + " AND ".join(clauses)
-        + " ORDER BY COALESCE(published_at, fetched_at) DESC, relevance DESC LIMIT ? OFFSET ?"
+    *,
+    tiers: str | list[str] | None = None,
+    kinds: str | list[str] | None = None,
+    min_credibility: float | None = None,
+    max_credibility: float | None = None,
+    min_relevance: float | None = None,
+    max_relevance: float | None = None,
+    min_sources: int | None = None,
+    single_source: bool = False,
+    keywords: str | list[str] | None = None,
+    query: str | None = None,
+    time_field: str = "published",
+    sort: str = "composite",
+    has_keyword: bool = False,
+) -> dict[str, Any]:
+    if time_field not in TIME_FIELDS:
+        time_field = "published"
+    if sort not in TOPIC_SORTS:
+        sort = "composite"
+    clauses, values = _topic_filter_clauses(
+        since_hours=since_hours,
+        scope=scope,
+        verdict=verdict,
+        include_keyword_only=include_keyword_only,
+        tiers=tiers,
+        kinds=kinds,
+        min_credibility=min_credibility,
+        max_credibility=max_credibility,
+        min_relevance=min_relevance,
+        max_relevance=max_relevance,
+        min_sources=min_sources,
+        single_source=single_source,
+        keywords=keywords,
+        query=query,
+        time_field=time_field,
+        has_keyword=has_keyword,
     )
-    values.extend([limit, offset])
+    where = " AND ".join(clauses)
+    order = _topic_order_sql(sort)
     with connect() as conn:
-        rows = conn.execute(sql, values).fetchall()
-    return [_serialize_article(row_to_dict(row)) for row in rows]
+        total = conn.execute(
+            f"SELECT COUNT(*) AS c FROM articles WHERE {where}", values
+        ).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT * FROM articles WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+            [*values, limit, offset],
+        ).fetchall()
+    return {
+        "items": [_serialize_article(row_to_dict(row)) for row in rows],
+        "total": int(total),
+    }
+
+
+def list_topics(
+    scope: str | list[str] | None = None,
+    limit: int = 40,
+    offset: int = 0,
+    since_hours: int = 168,
+    verdict: str | list[str] | None = None,
+    include_keyword_only: bool = False,
+    **filters: Any,
+) -> list[dict[str, Any]]:
+    return query_topics(
+        scope=scope,
+        limit=limit,
+        offset=offset,
+        since_hours=since_hours,
+        verdict=verdict,
+        include_keyword_only=include_keyword_only,
+        **filters,
+    )["items"]
 
 
 def get_article(article_id: int) -> dict[str, Any] | None:

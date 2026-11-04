@@ -40,6 +40,80 @@ const TIER_LABELS = {
   research: "研究",
 };
 
+const VERDICT_ORDER = ["verified", "likely", "unverified", "suspicious"];
+const TIER_OPTIONS = ["official", "release", "research", "media", "community", "heat"];
+const KIND_OPTIONS = ["news", "release", "research", "discussion", "video", "heat"];
+
+const PRESETS = {
+  all: { label: "全部", timeHours: 168, timeField: "published", sort: "composite" },
+  today: {
+    label: "今日选题",
+    timeHours: 24,
+    timeField: "published",
+    verdicts: ["verified", "likely"],
+    minRelevance: 60,
+    sort: "composite",
+  },
+  official: {
+    label: "官方发布",
+    timeHours: 168,
+    timeField: "published",
+    tiers: ["official", "release"],
+    sort: "newest",
+  },
+  sources: {
+    label: "多源热点",
+    timeHours: 168,
+    timeField: "published",
+    minSources: 2,
+    sort: "sources",
+  },
+  rumor: {
+    label: "爆料核查",
+    timeHours: 168,
+    timeField: "published",
+    verdicts: ["suspicious", "unverified"],
+    sort: "newest",
+  },
+};
+
+const QUICK_CHIPS = [
+  { key: "verified", label: "已核实" },
+  { key: "sources", label: "多源" },
+  { key: "today", label: "今日新增" },
+  { key: "keyword", label: "关键词命中" },
+];
+
+const FILTER_STORAGE_KEY = "signalradar.filters.v1";
+const FILTER_PARAM_KEYS = [
+  "scope", "verdict", "tier", "kind", "since_hours", "time_field", "min_credibility",
+  "max_credibility", "min_relevance", "max_relevance", "min_sources", "single_source",
+  "keyword", "has_keyword", "include_keyword_only", "q", "sort", "preset",
+];
+
+function defaultFilters() {
+  return {
+    activeScopes: [],
+    verdicts: [],
+    tiers: [],
+    kinds: [],
+    timeHours: 168,
+    timeField: "published",
+    minCredibility: null,
+    maxCredibility: null,
+    minRelevance: null,
+    maxRelevance: null,
+    minSources: null,
+    singleSource: false,
+    keywordFilter: "",
+    hasKeyword: false,
+    includeKeywordOnly: false,
+    searchQuery: "",
+    sort: "composite",
+    preset: "all",
+  };
+}
+
 const state = {
   scopes: [],
   keywords: [],
@@ -48,13 +122,14 @@ const state = {
   settings: {},
   stats: {},
   health: null,
-  activeScope: null,
-  verdict: "",
   limit: 30,
   hasMore: false,
+  total: 0,
   loading: false,
   requestSeq: 0,
   stream: null,
+  filterOpen: false,
+  ...defaultFilters(),
 };
 
 function escapeHtml(value) {
@@ -104,6 +179,372 @@ function debounce(fn, wait = 400) {
     clearTimeout(timer);
     timer = setTimeout(() => fn(...args), wait);
   };
+}
+
+function numberOrNull(value, min = 0, max = 100) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const num = Number(text);
+  if (!Number.isFinite(num)) return null;
+  return Math.max(min, Math.min(max, num));
+}
+
+function filtersFromState() {
+  return {
+    activeScopes: [...state.activeScopes],
+    verdicts: [...state.verdicts],
+    tiers: [...state.tiers],
+    kinds: [...state.kinds],
+    timeHours: state.timeHours,
+    timeField: state.timeField,
+    minCredibility: state.minCredibility,
+    maxCredibility: state.maxCredibility,
+    minRelevance: state.minRelevance,
+    maxRelevance: state.maxRelevance,
+    minSources: state.minSources,
+    singleSource: state.singleSource,
+    keywordFilter: state.keywordFilter,
+    hasKeyword: state.hasKeyword,
+    includeKeywordOnly: state.includeKeywordOnly,
+    searchQuery: state.searchQuery,
+    sort: state.sort,
+    preset: state.preset,
+  };
+}
+
+function sanitizeFilters(raw) {
+  const filters = defaultFilters();
+  if (!raw || typeof raw !== "object") return filters;
+  const list = (value, allowed) =>
+    Array.isArray(value) ? value.map(String).filter((item) => !allowed || allowed.includes(item)) : [];
+  filters.activeScopes = list(raw.activeScopes);
+  filters.verdicts = list(raw.verdicts, VERDICT_ORDER);
+  filters.tiers = list(raw.tiers, TIER_OPTIONS);
+  filters.kinds = list(raw.kinds, KIND_OPTIONS);
+  filters.timeHours = [24, 72, 168, 720].includes(Number(raw.timeHours)) ? Number(raw.timeHours) : 168;
+  filters.timeField = ["published", "fetched"].includes(raw.timeField) ? raw.timeField : "published";
+  filters.minCredibility = numberOrNull(raw.minCredibility);
+  filters.maxCredibility = numberOrNull(raw.maxCredibility);
+  filters.minRelevance = numberOrNull(raw.minRelevance);
+  filters.maxRelevance = numberOrNull(raw.maxRelevance);
+  filters.minSources = [2, 3].includes(Number(raw.minSources)) ? Number(raw.minSources) : null;
+  filters.singleSource = Boolean(raw.singleSource);
+  filters.keywordFilter = String(raw.keywordFilter || "").trim();
+  filters.hasKeyword = Boolean(raw.hasKeyword);
+  filters.includeKeywordOnly = Boolean(raw.includeKeywordOnly);
+  filters.searchQuery = String(raw.searchQuery || "").trim();
+  filters.sort = ["composite", "newest", "fetched", "credibility", "relevance", "sources"].includes(raw.sort)
+    ? raw.sort
+    : "composite";
+  filters.preset = Object.prototype.hasOwnProperty.call(PRESETS, raw.preset) ? raw.preset : "all";
+  return filters;
+}
+
+function filtersFromParams(params) {
+  const filters = defaultFilters();
+  if (params.has("scope")) filters.activeScopes = params.getAll("scope");
+  if (params.has("verdict")) filters.verdicts = params.getAll("verdict");
+  if (params.has("tier")) filters.tiers = params.getAll("tier");
+  if (params.has("kind")) filters.kinds = params.getAll("kind");
+  if (params.has("since_hours")) filters.timeHours = Number(params.get("since_hours"));
+  if (params.has("time_field")) filters.timeField = params.get("time_field");
+  filters.minCredibility = numberOrNull(params.get("min_credibility"));
+  filters.maxCredibility = numberOrNull(params.get("max_credibility"));
+  filters.minRelevance = numberOrNull(params.get("min_relevance"));
+  filters.maxRelevance = numberOrNull(params.get("max_relevance"));
+  if (params.get("single_source") === "true") filters.singleSource = true;
+  else if (params.has("min_sources")) filters.minSources = Number(params.get("min_sources"));
+  if (params.has("keyword")) filters.keywordFilter = params.get("keyword");
+  filters.hasKeyword = params.get("has_keyword") === "true";
+  filters.includeKeywordOnly = params.get("include_keyword_only") === "true";
+  filters.searchQuery = params.get("q") || "";
+  filters.sort = params.get("sort") || "composite";
+  const presetKey = params.get("preset") || "";
+  filters.preset = presetKey;
+  const explicitConditions = FILTER_PARAM_KEYS.filter((key) => key !== "preset");
+  if (presetKey && PRESETS[presetKey] && !explicitConditions.some((key) => params.has(key))) {
+    const { label, ...presetFilters } = PRESETS[presetKey];
+    Object.assign(filters, presetFilters);
+  }
+  return sanitizeFilters(filters);
+}
+
+function restoreFilters() {
+  const params = new URLSearchParams(window.location.search);
+  let filters = null;
+  if (FILTER_PARAM_KEYS.some((key) => params.has(key))) {
+    filters = filtersFromParams(params);
+  } else {
+    try {
+      const stored = window.localStorage.getItem(FILTER_STORAGE_KEY);
+      if (stored) filters = sanitizeFilters(JSON.parse(stored));
+    } catch (error) {
+      filters = null;
+    }
+  }
+  Object.assign(state, defaultFilters(), filters || defaultFilters());
+}
+
+function persistFilters() {
+  const filters = filtersFromState();
+  try {
+    window.localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filters));
+  } catch (error) {
+    console.warn("filter persist failed", error);
+  }
+  const params = new URLSearchParams();
+  filters.activeScopes.forEach((item) => params.append("scope", item));
+  filters.verdicts.forEach((item) => params.append("verdict", item));
+  filters.tiers.forEach((item) => params.append("tier", item));
+  filters.kinds.forEach((item) => params.append("kind", item));
+  if (filters.timeHours !== 168) params.set("since_hours", String(filters.timeHours));
+  if (filters.timeField !== "published") params.set("time_field", filters.timeField);
+  if (filters.minCredibility != null) params.set("min_credibility", String(filters.minCredibility));
+  if (filters.maxCredibility != null) params.set("max_credibility", String(filters.maxCredibility));
+  if (filters.minRelevance != null) params.set("min_relevance", String(filters.minRelevance));
+  if (filters.maxRelevance != null) params.set("max_relevance", String(filters.maxRelevance));
+  if (filters.singleSource) params.set("single_source", "true");
+  else if (filters.minSources) params.set("min_sources", String(filters.minSources));
+  if (filters.keywordFilter) params.set("keyword", filters.keywordFilter);
+  if (filters.hasKeyword) params.set("has_keyword", "true");
+  if (filters.includeKeywordOnly) params.set("include_keyword_only", "true");
+  if (filters.searchQuery) params.set("q", filters.searchQuery);
+  if (filters.sort !== "composite") params.set("sort", filters.sort);
+  if (filters.preset && filters.preset !== "all") params.set("preset", filters.preset);
+  const query = params.toString();
+  const path = `${window.location.pathname}${query ? `?${query}` : ""}`;
+  window.history.replaceState(null, "", path);
+}
+
+function activeFilterCount() {
+  let count = 0;
+  count += state.activeScopes.length;
+  count += state.verdicts.length;
+  count += state.tiers.length;
+  count += state.kinds.length;
+  if (state.timeHours !== 168 || state.timeField !== "published") count += 1;
+  if (state.minCredibility != null || state.maxCredibility != null) count += 1;
+  if (state.minRelevance != null || state.maxRelevance != null) count += 1;
+  if (state.minSources != null || state.singleSource) count += 1;
+  if (state.keywordFilter) count += 1;
+  if (state.hasKeyword) count += 1;
+  if (state.includeKeywordOnly) count += 1;
+  if (state.searchQuery) count += 1;
+  return count;
+}
+
+function filterOptionMarkup(name, values, labels) {
+  return values
+    .map(
+      (value) => `
+        <label class="check-chip">
+          <input type="checkbox" name="${name}" value="${escapeHtml(value)}"${state[name === "verdict" ? "verdicts" : name === "tier" ? "tiers" : "kinds"].includes(value) ? " checked" : ""}>
+          <span>${escapeHtml(labels[value] || value)}</span>
+        </label>
+      `
+    )
+    .join("");
+}
+
+function renderFilterOptions() {
+  $("verdictOptions").innerHTML = filterOptionMarkup("verdict", VERDICT_ORDER, VERDICT_LABELS);
+  $("tierOptions").innerHTML = filterOptionMarkup("tier", TIER_OPTIONS, TIER_LABELS);
+  $("kindOptions").innerHTML = filterOptionMarkup("kind", KIND_OPTIONS, KIND_LABELS);
+}
+
+function renderKeywordOptions() {
+  const select = $("keywordFilter");
+  if (!select) return;
+  const options = state.keywords
+    .map((keyword) => `<option value="${escapeHtml(keyword.term)}">${escapeHtml(keyword.term)}</option>`)
+    .join("");
+  select.innerHTML = `<option value="">全部关键词</option>${options}`;
+  if (state.keywordFilter && !state.keywords.some((keyword) => keyword.term === state.keywordFilter)) {
+    state.keywordFilter = "";
+  }
+  select.value = state.keywordFilter;
+}
+
+function renderPresets() {
+  $("presetTabs").innerHTML = Object.entries(PRESETS)
+    .map(
+      ([key, preset]) =>
+        `<button type="button" class="preset-tab${state.preset === key ? " active" : ""}" data-preset="${key}">${escapeHtml(preset.label)}</button>`
+    )
+    .join("");
+}
+
+function quickChipActive(key) {
+  if (key === "verified") return state.verdicts.includes("verified");
+  if (key === "sources") return state.minSources === 2;
+  if (key === "today") return state.timeHours === 24 && state.timeField === "fetched";
+  if (key === "keyword") return state.hasKeyword;
+  return false;
+}
+
+function renderQuickChips() {
+  $("quickChips").innerHTML = QUICK_CHIPS
+    .map(
+      (chip) =>
+        `<button type="button" class="quick-chip${quickChipActive(chip.key) ? " active" : ""}" data-quick="${chip.key}">${escapeHtml(chip.label)}</button>`
+    )
+    .join("");
+}
+
+function activeFilterEntries() {
+  const entries = [];
+  state.activeScopes.forEach((item) => entries.push({ filter: "scope", value: item, label: item }));
+  state.verdicts.forEach((item) =>
+    entries.push({ filter: "verdict", value: item, label: VERDICT_LABELS[item] || item })
+  );
+  state.tiers.forEach((item) =>
+    entries.push({ filter: "tier", value: item, label: `来源·${TIER_LABELS[item] || item}` })
+  );
+  state.kinds.forEach((item) =>
+    entries.push({ filter: "kind", value: item, label: KIND_LABELS[item] || item })
+  );
+  if (state.timeHours !== 168 || state.timeField !== "published") {
+    const hours = state.timeHours === 24 ? "24 小时" : state.timeHours === 72 ? "3 天" : state.timeHours === 720 ? "30 天" : "7 天";
+    entries.push({
+      filter: "time",
+      label: `${state.timeField === "fetched" ? "入库" : "发布"} ${hours}`,
+    });
+  }
+  if (state.minCredibility != null) entries.push({ filter: "minCredibility", label: `可信度 ≥ ${state.minCredibility}` });
+  if (state.maxCredibility != null) entries.push({ filter: "maxCredibility", label: `可信度 ≤ ${state.maxCredibility}` });
+  if (state.minRelevance != null) entries.push({ filter: "minRelevance", label: `相关度 ≥ ${state.minRelevance}` });
+  if (state.maxRelevance != null) entries.push({ filter: "maxRelevance", label: `相关度 ≤ ${state.maxRelevance}` });
+  if (state.singleSource) entries.push({ filter: "singleSource", label: "仅单源" });
+  else if (state.minSources) entries.push({ filter: "minSources", label: `至少 ${state.minSources} 家来源` });
+  if (state.keywordFilter) entries.push({ filter: "keyword", label: `关键词·${state.keywordFilter}` });
+  if (state.hasKeyword) entries.push({ filter: "hasKeyword", label: "仅关键词命中" });
+  if (state.includeKeywordOnly) entries.push({ filter: "includeKeywordOnly", label: "含关键词入库" });
+  if (state.searchQuery) entries.push({ filter: "search", label: `搜索·${state.searchQuery}` });
+  return entries;
+}
+
+function renderActiveFilters() {
+  const entries = activeFilterEntries();
+  const container = $("activeFilters");
+  if (!entries.length) {
+    container.innerHTML = '<span class="filter-empty">未启用筛选 · 近七天 · 综合优先</span>';
+    return;
+  }
+  container.innerHTML =
+    entries
+      .map(
+        (entry) =>
+          `<button type="button" class="filter-pill" data-filter="${entry.filter}" data-value="${escapeHtml(entry.value || "")}">${escapeHtml(entry.label)} <i>×</i></button>`
+      )
+      .join("") + '<button type="button" class="filter-clear" id="clearFilterPills">清空</button>';
+}
+
+function updateFilterBadge() {
+  const count = activeFilterCount();
+  const badge = $("filterBadge");
+  badge.textContent = String(count);
+  badge.hidden = count === 0;
+}
+
+function syncFilterControls() {
+  $("timeHours").value = String(state.timeHours);
+  $("timeField").value = state.timeField;
+  $("minSources").value = state.singleSource ? "single" : state.minSources ? String(state.minSources) : "";
+  renderKeywordOptions();
+  $("searchInput").value = state.searchQuery;
+  $("minCredibility").value = state.minCredibility ?? "";
+  $("maxCredibility").value = state.maxCredibility ?? "";
+  $("minRelevance").value = state.minRelevance ?? "";
+  $("maxRelevance").value = state.maxRelevance ?? "";
+  $("hasKeyword").checked = state.hasKeyword;
+  $("includeKeywordOnly").checked = state.includeKeywordOnly;
+  $("sortSelect").value = state.sort;
+  renderFilterOptions();
+  renderPresets();
+  renderQuickChips();
+  renderActiveFilters();
+  updateFilterBadge();
+  $("filterPanel").hidden = !state.filterOpen;
+  $("filterToggle").setAttribute("aria-expanded", state.filterOpen ? "true" : "false");
+}
+
+function readFilterControls() {
+  state.timeHours = Number($("timeHours").value) || 168;
+  state.timeField = $("timeField").value;
+  const sourceValue = $("minSources").value;
+  state.singleSource = sourceValue === "single";
+  state.minSources = !state.singleSource && sourceValue ? Number(sourceValue) : null;
+  state.keywordFilter = $("keywordFilter").value;
+  state.searchQuery = $("searchInput").value.trim();
+  state.minCredibility = numberOrNull($("minCredibility").value);
+  state.maxCredibility = numberOrNull($("maxCredibility").value);
+  state.minRelevance = numberOrNull($("minRelevance").value);
+  state.maxRelevance = numberOrNull($("maxRelevance").value);
+  state.hasKeyword = $("hasKeyword").checked;
+  state.includeKeywordOnly = $("includeKeywordOnly").checked;
+  state.verdicts = Array.from(document.querySelectorAll('#verdictOptions input:checked')).map((el) => el.value);
+  state.tiers = Array.from(document.querySelectorAll('#tierOptions input:checked')).map((el) => el.value);
+  state.kinds = Array.from(document.querySelectorAll('#kindOptions input:checked')).map((el) => el.value);
+  state.preset = "";
+}
+
+function applyPreset(key) {
+  const preset = PRESETS[key];
+  if (!preset) return;
+  const { label, ...filters } = preset;
+  Object.assign(state, defaultFilters(), filters);
+  state.preset = key;
+  syncFilterControls();
+  fetchTopics({ reset: true });
+}
+
+function toggleQuickChip(key) {
+  if (key === "verified") {
+    state.verdicts = state.verdicts.includes("verified")
+      ? state.verdicts.filter((item) => item !== "verified")
+      : [...state.verdicts, "verified"];
+  } else if (key === "sources") {
+    state.minSources = state.minSources === 2 ? null : 2;
+    state.singleSource = false;
+  } else if (key === "today") {
+    if (state.timeHours === 24 && state.timeField === "fetched") {
+      state.timeHours = 168;
+      state.timeField = "published";
+    } else {
+      state.timeHours = 24;
+      state.timeField = "fetched";
+    }
+  } else if (key === "keyword") {
+    state.hasKeyword = !state.hasKeyword;
+  }
+  state.preset = "";
+  syncFilterControls();
+  persistFilters();
+  fetchTopics({ reset: true });
+}
+
+function clearFilter(key, value) {
+  if (key === "scope") state.activeScopes = state.activeScopes.filter((item) => item !== value);
+  else if (key === "verdict") state.verdicts = state.verdicts.filter((item) => item !== value);
+  else if (key === "tier") state.tiers = state.tiers.filter((item) => item !== value);
+  else if (key === "kind") state.kinds = state.kinds.filter((item) => item !== value);
+  else if (key === "time") {
+    state.timeHours = 168;
+    state.timeField = "published";
+  } else if (key === "minCredibility") state.minCredibility = null;
+  else if (key === "maxCredibility") state.maxCredibility = null;
+  else if (key === "minRelevance") state.minRelevance = null;
+  else if (key === "maxRelevance") state.maxRelevance = null;
+  else if (key === "minSources") state.minSources = null;
+  else if (key === "singleSource") state.singleSource = false;
+  else if (key === "keyword") state.keywordFilter = "";
+  else if (key === "hasKeyword") state.hasKeyword = false;
+  else if (key === "includeKeywordOnly") state.includeKeywordOnly = false;
+  else if (key === "search") state.searchQuery = "";
+  state.preset = "";
+  syncFilterControls();
+  persistFilters();
+  fetchTopics({ reset: true });
 }
 
 async function api(path, options = {}) {
@@ -167,17 +608,17 @@ function renderStatus() {
 
 function renderScopes() {
   const container = $("scopeTabs");
+  const available = new Set(state.scopes.map((scope) => scope.name));
+  state.activeScopes = state.activeScopes.filter((name) => available.has(name));
   const tabs = [{ name: null, label: "全部" }].concat(
     state.scopes.map((scope) => ({ name: scope.name, label: scope.name }))
   );
-  if (state.activeScope && !state.scopes.some((scope) => scope.name === state.activeScope)) {
-    state.activeScope = null;
-  }
+  const allActive = state.activeScopes.length === 0;
   container.innerHTML = tabs
-    .map(
-      (tab) =>
-        `<button type="button" class="scope-tab${state.activeScope === tab.name ? " active" : ""}" data-scope="${escapeHtml(tab.name || "")}">${escapeHtml(tab.label)}</button>`
-    )
+    .map((tab) => {
+      const active = tab.name === null ? allActive : state.activeScopes.includes(tab.name);
+      return `<button type="button" class="scope-tab${active ? " active" : ""}" data-scope="${escapeHtml(tab.name || "")}" aria-pressed="${active}">${escapeHtml(tab.label)}</button>`;
+    })
     .join("");
 }
 
@@ -246,12 +687,19 @@ function renderTopics() {
   if (!state.topics.length) {
     list.innerHTML = "";
     empty.hidden = false;
+    empty.innerHTML =
+      activeFilterCount() > 0
+        ? '<p class="empty-big">没有符合筛选的信号</p><p class="empty-small">试着放宽时间窗，或清空部分筛选条件。</p>'
+        : '<p class="empty-big">等待第一声信号</p><p class="empty-small">编辑部已就位。点击「采集新信号」，或稍等自动巡检。</p>';
   } else {
     empty.hidden = true;
     list.innerHTML = state.topics.map(topicMarkup).join("");
   }
+  const total = state.total || state.topics.length;
   $("wireCount").textContent = state.topics.length
-    ? `近七天 · ${state.topics.length} 条信号`
+    ? activeFilterCount() > 0
+      ? `筛选后 ${total} 条 · 已显示 ${state.topics.length} 条`
+      : `近七天 · ${total} 条信号`
     : "";
   $("loadMoreBtn").hidden = !state.hasMore || state.topics.length === 0;
   renderTicker();
@@ -294,6 +742,7 @@ function renderKeywords() {
       .join("");
   }
   renderRadarPips();
+  renderKeywordOptions();
 }
 
 function renderAlerts() {
@@ -374,14 +823,13 @@ async function loadDashboard() {
   state.settings = data.settings || {};
   state.stats = data.stats || {};
   state.runs = data.runs || [];
+  state.total = state.topics.length;
   state.hasMore = state.topics.length >= state.limit;
-  if (state.activeScope && !state.scopes.some((scope) => scope.name === state.activeScope)) {
-    state.activeScope = null;
-  }
   renderScopes();
   renderTopics();
   renderKeywords();
   renderAlerts();
+  syncFilterControls();
   renderStatus();
   if ($("settingsDialog").open) fillSettings();
 }
@@ -404,16 +852,32 @@ async function fetchTopics({ reset = false } = {}) {
   const params = new URLSearchParams({
     limit: String(state.limit),
     offset: String(offset),
-    since_hours: "168",
+    since_hours: String(state.timeHours),
+    time_field: state.timeField,
+    sort: state.sort,
   });
-  if (state.activeScope) params.set("scope", state.activeScope);
-  if (state.verdict) params.set("verdict", state.verdict);
+  state.activeScopes.forEach((item) => params.append("scope", item));
+  state.verdicts.forEach((item) => params.append("verdict", item));
+  state.tiers.forEach((item) => params.append("tier", item));
+  state.kinds.forEach((item) => params.append("kind", item));
+  if (state.minCredibility != null) params.set("min_credibility", String(state.minCredibility));
+  if (state.maxCredibility != null) params.set("max_credibility", String(state.maxCredibility));
+  if (state.minRelevance != null) params.set("min_relevance", String(state.minRelevance));
+  if (state.maxRelevance != null) params.set("max_relevance", String(state.maxRelevance));
+  if (state.singleSource) params.set("single_source", "true");
+  else if (state.minSources) params.set("min_sources", String(state.minSources));
+  if (state.keywordFilter) params.set("keyword", state.keywordFilter);
+  if (state.hasKeyword) params.set("has_keyword", "true");
+  if (state.includeKeywordOnly) params.set("include_keyword_only", "true");
+  if (state.searchQuery) params.set("q", state.searchQuery);
+  if (reset) persistFilters();
   try {
     const data = await api(`/api/topics?${params.toString()}`);
     if (seq !== state.requestSeq) return;
     const items = data.items || [];
     state.topics = reset ? items : state.topics.concat(items);
-    state.hasMore = items.length >= state.limit;
+    state.total = Number(data.total || 0);
+    state.hasMore = offset + items.length < state.total;
     renderTopics();
   } catch (error) {
     if (seq === state.requestSeq) toast(`读取热点失败：${error.message}`);
@@ -572,11 +1036,16 @@ function connectStream() {
 async function refreshKeywordsAndAlerts() {
   try {
     const [keywords, alerts] = await Promise.all([api("/api/keywords"), api("/api/alerts?limit=30")]);
+    const keywordBefore = state.keywordFilter;
     state.keywords = keywords;
     state.alerts = alerts;
     renderKeywords();
     renderAlerts();
+    syncFilterControls();
     renderStatus();
+    if (keywordBefore && !state.keywordFilter) {
+      fetchTopics({ reset: true });
+    }
   } catch (error) {
     console.warn(error);
   }
@@ -586,14 +1055,85 @@ function bindEvents() {
   $("scopeTabs").addEventListener("click", (event) => {
     const button = event.target.closest(".scope-tab");
     if (!button) return;
-    state.activeScope = button.dataset.scope || null;
+    const name = button.dataset.scope || "";
+    if (!name) {
+      state.activeScopes = [];
+    } else if (state.activeScopes.includes(name)) {
+      state.activeScopes = state.activeScopes.filter((item) => item !== name);
+    } else {
+      state.activeScopes = [...state.activeScopes, name];
+    }
+    state.preset = "";
     renderScopes();
+    syncFilterControls();
     fetchTopics({ reset: true });
   });
 
-  $("verdictFilter").addEventListener("change", (event) => {
-    state.verdict = event.target.value;
+  $("sortSelect").addEventListener("change", (event) => {
+    state.sort = event.target.value;
+    state.preset = "";
+    syncFilterControls();
     fetchTopics({ reset: true });
+  });
+
+  $("filterToggle").addEventListener("click", () => {
+    state.filterOpen = !state.filterOpen;
+    syncFilterControls();
+  });
+
+  $("presetTabs").addEventListener("click", (event) => {
+    const button = event.target.closest(".preset-tab");
+    if (!button) return;
+    applyPreset(button.dataset.preset);
+  });
+
+  $("quickChips").addEventListener("click", (event) => {
+    const button = event.target.closest(".quick-chip");
+    if (!button) return;
+    toggleQuickChip(button.dataset.quick);
+  });
+
+  $("applyFilters").addEventListener("click", () => {
+    readFilterControls();
+    if (
+      state.minCredibility != null &&
+      state.maxCredibility != null &&
+      state.minCredibility > state.maxCredibility
+    ) {
+      toast("可信度最低值不能高于最高值");
+      return;
+    }
+    if (
+      state.minRelevance != null &&
+      state.maxRelevance != null &&
+      state.minRelevance > state.maxRelevance
+    ) {
+      toast("相关度最低值不能高于最高值");
+      return;
+    }
+    state.filterOpen = false;
+    syncFilterControls();
+    fetchTopics({ reset: true });
+  });
+
+  $("resetFilters").addEventListener("click", () => {
+    Object.assign(state, defaultFilters());
+    state.filterOpen = false;
+    syncFilterControls();
+    fetchTopics({ reset: true });
+  });
+
+  $("activeFilters").addEventListener("click", (event) => {
+    if (event.target.closest("#clearFilterPills")) {
+      Object.assign(state, defaultFilters());
+      state.filterOpen = false;
+      syncFilterControls();
+      fetchTopics({ reset: true });
+      return;
+    }
+    const pill = event.target.closest(".filter-pill");
+    if (!pill) return;
+    clearFilter(pill.dataset.filter, pill.dataset.value);
   });
 
   $("refreshBtn").addEventListener("click", async () => {
@@ -759,6 +1299,7 @@ function bindEvents() {
       $("scopeName").value = "";
       $("scopeQuery").value = "";
       await loadDashboard();
+      await fetchTopics({ reset: true });
       toast("新范围已加入下一期监听");
     } catch (error) {
       toast(error.message);
@@ -772,6 +1313,7 @@ function bindEvents() {
     try {
       await api(`/api/scopes/${button.dataset.id}`, { method: "DELETE" });
       await loadDashboard();
+      await fetchTopics({ reset: true });
       toast("范围已删除");
     } catch (error) {
       toast(error.message);
@@ -788,9 +1330,11 @@ function bindEvents() {
 async function init() {
   $("todayLabel").textContent = formatToday();
   updateNotifyButton();
+  restoreFilters();
   bindEvents();
   try {
     await Promise.all([loadDashboard(), loadHealth()]);
+    await fetchTopics({ reset: true });
   } catch (error) {
     toast(`初始化失败：${error.message}`, 8000);
   }

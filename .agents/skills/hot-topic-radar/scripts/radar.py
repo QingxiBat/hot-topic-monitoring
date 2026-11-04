@@ -237,26 +237,75 @@ def _scope_value(value):
 
 
 def topics_impl(args):
-    scope = _scope_value(getattr(args, "scope", None))
+    scopes = getattr(args, "scope", None) or None
+    if args.single_source and args.min_sources:
+        fail("--single-source 与 --min-sources 不能同时使用", args.json)
+    if (
+        args.min_credibility is not None
+        and args.max_credibility is not None
+        and args.min_credibility > args.max_credibility
+    ):
+        fail("可信度区间不合法", args.json)
+    if (
+        args.min_relevance is not None
+        and args.max_relevance is not None
+        and args.min_relevance > args.max_relevance
+    ):
+        fail("相关度区间不合法", args.json)
     if args.api:
         params = {
             "limit": args.limit,
             "since_hours": args.hours,
+            "time_field": args.time_field,
+            "sort": args.sort,
             "include_keyword_only": str(args.include_keyword_only).lower(),
+            "has_keyword": str(args.has_keyword).lower(),
+            "single_source": str(args.single_source).lower(),
         }
-        if scope:
-            params["scope"] = scope
+        if scopes:
+            params["scope"] = scopes
         if args.verdict:
             params["verdict"] = args.verdict
+        if args.tier:
+            params["tier"] = args.tier
+        if args.kind:
+            params["kind"] = args.kind
+        if args.min_credibility is not None:
+            params["min_credibility"] = args.min_credibility
+        if args.max_credibility is not None:
+            params["max_credibility"] = args.max_credibility
+        if args.min_relevance is not None:
+            params["min_relevance"] = args.min_relevance
+        if args.max_relevance is not None:
+            params["max_relevance"] = args.max_relevance
+        if args.min_sources is not None:
+            params["min_sources"] = args.min_sources
+        if args.keyword:
+            params["keyword"] = args.keyword
+        if args.q:
+            params["q"] = args.q
         data = api_request(args.api, "GET", "/api/topics", params=params)
         return data.get("items", [])
     db.init_db()
     return db.list_topics(
-        scope=scope,
+        scope=scopes,
         limit=args.limit,
         since_hours=args.hours,
         verdict=args.verdict,
         include_keyword_only=args.include_keyword_only,
+        tiers=args.tier,
+        kinds=args.kind,
+        min_credibility=args.min_credibility,
+        max_credibility=args.max_credibility,
+        min_relevance=args.min_relevance,
+        max_relevance=args.max_relevance,
+        min_sources=args.min_sources,
+        single_source=args.single_source,
+        keywords=args.keyword,
+        query=args.q,
+        time_field=args.time_field,
+        sort=args.sort,
+        has_keyword=args.has_keyword,
     )
 
 
@@ -432,6 +481,27 @@ def cmd_run(args):
     )
 
 
+def add_topic_filter_args(parser, default_hours=168, default_limit=20):
+    parser.add_argument("--scope", action="append", help="范围，可重复")
+    parser.add_argument("--hours", type=int, default=default_hours)
+    parser.add_argument("--limit", type=int, default=default_limit)
+    parser.add_argument("--verdict", action="append", choices=["verified", "likely", "unverified", "suspicious"])
+    parser.add_argument("--tier", action="append", choices=["official", "release", "research", "media", "community", "heat"])
+    parser.add_argument("--kind", action="append", choices=["news", "release", "research", "discussion", "video", "heat"])
+    parser.add_argument("--min-credibility", type=float)
+    parser.add_argument("--max-credibility", type=float)
+    parser.add_argument("--min-relevance", type=float)
+    parser.add_argument("--max-relevance", type=float)
+    parser.add_argument("--min-sources", type=int)
+    parser.add_argument("--single-source", action="store_true", default=False)
+    parser.add_argument("--keyword", action="append")
+    parser.add_argument("--has-keyword", action="store_true", default=False)
+    parser.add_argument("--q")
+    parser.add_argument("--time-field", choices=["published", "fetched"], default="published")
+    parser.add_argument("--sort", choices=["composite", "newest", "fetched", "credibility", "relevance", "sources"], default="composite")
+    parser.add_argument("--include-keyword-only", action="store_true", default=False)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="SignalRadar Agent Skill CLI：监控 AI 热点、关键词与可信度。"
@@ -459,11 +529,7 @@ def build_parser():
     keywords.set_defaults(func=cmd_keywords)
 
     topics = sub.add_parser("topics", help="读取已发现的热点")
-    topics.add_argument("--scope")
-    topics.add_argument("--hours", type=int, default=168)
-    topics.add_argument("--limit", type=int, default=20)
-    topics.add_argument("--verdict", choices=["verified", "likely", "unverified", "suspicious"])
-    topics.add_argument("--include-keyword-only", action="store_true", default=False)
+    add_topic_filter_args(topics, default_hours=168, default_limit=20)
     topics.set_defaults(func=cmd_topics)
 
     alerts = sub.add_parser("alerts", help="读取关键词电报")
@@ -480,13 +546,9 @@ def build_parser():
     collect.set_defaults(func=cmd_collect)
 
     scan = sub.add_parser("scan", help="采集并返回最新热点（推荐入口）")
-    scan.add_argument("--scope", action="append", help="只采集指定范围，可重复")
+    add_topic_filter_args(scan, default_hours=72, default_limit=10)
     scan.add_argument("--no-collect", action="store_true", help="只读数据库，不触发采集")
     scan.add_argument("--no-feeds", action="store_true")
-    scan.add_argument("--hours", type=int, default=72)
-    scan.add_argument("--limit", type=int, default=10)
-    scan.add_argument("--verdict", choices=["verified", "likely", "unverified", "suspicious"])
-    scan.add_argument("--include-keyword-only", action="store_true", default=False)
     scan.add_argument("--wait", action="store_true", default=True)
     scan.add_argument("--timeout", type=int, default=300)
     scan.set_defaults(func=cmd_scan)

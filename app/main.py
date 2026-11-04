@@ -138,19 +138,101 @@ def dashboard():
     }
 
 
+VERDICTS = {"verified", "likely", "unverified", "suspicious"}
+TIERS = {"official", "release", "research", "media", "community", "heat"}
+KINDS = {"news", "release", "research", "discussion", "video", "heat"}
+
+
+def _clean_text_list(values: list[str] | None, label: str, max_length: int) -> list[str] | None:
+    if values is None:
+        return None
+    cleaned = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        if len(text) > max_length:
+            raise HTTPException(status_code=400, detail=f"{label}过长")
+        cleaned.append(text)
+    return cleaned or None
+
+
+def _clean_allowed_list(
+    values: list[str] | None, allowed: set[str], label: str
+) -> list[str] | None:
+    cleaned = _clean_text_list(values, label, 60)
+    if cleaned:
+        for value in cleaned:
+            if value not in allowed:
+                raise HTTPException(status_code=400, detail=f"未知的{label}")
+    return cleaned
+
+
 @app.get("/api/topics")
 def topics(
-    scope: str | None = Query(default=None, max_length=60),
+    scope: list[str] | None = Query(default=None),
     limit: int = Query(default=30, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     since_hours: int = Query(default=168, ge=1, le=720),
-    verdict: str | None = Query(default=None),
+    verdict: list[str] | None = Query(default=None),
     include_keyword_only: bool = Query(default=False),
+    tier: list[str] | None = Query(default=None),
+    kind: list[str] | None = Query(default=None),
+    min_credibility: float | None = Query(default=None, ge=0, le=100),
+    max_credibility: float | None = Query(default=None, ge=0, le=100),
+    min_relevance: float | None = Query(default=None, ge=0, le=100),
+    max_relevance: float | None = Query(default=None, ge=0, le=100),
+    min_sources: int | None = Query(default=None, ge=1, le=10),
+    single_source: bool = Query(default=False),
+    keyword: list[str] | None = Query(default=None),
+    has_keyword: bool = Query(default=False),
+    q: str | None = Query(default=None, max_length=200),
+    time_field: str = Query(default="published"),
+    sort: str = Query(default="composite"),
 ):
-    if verdict and verdict not in {"verified", "likely", "unverified", "suspicious"}:
-        raise HTTPException(status_code=400, detail="未知的可信度筛选")
+    scope = _clean_text_list(scope, "范围", 60)
+    verdict = _clean_allowed_list(verdict, VERDICTS, "可信度筛选")
+    tier = _clean_allowed_list(tier, TIERS, "来源层级")
+    kind = _clean_allowed_list(kind, KINDS, "内容类型")
+    keyword = _clean_text_list(keyword, "关键词", 80)
+    if sort not in db.TOPIC_SORTS:
+        raise HTTPException(status_code=400, detail="未知的排序方式")
+    if time_field not in db.TIME_FIELDS:
+        raise HTTPException(status_code=400, detail="未知的时间基准")
+    if (
+        min_credibility is not None
+        and max_credibility is not None
+        and min_credibility > max_credibility
+    ):
+        raise HTTPException(status_code=400, detail="可信度区间不合法")
+    if min_relevance is not None and max_relevance is not None and min_relevance > max_relevance:
+        raise HTTPException(status_code=400, detail="相关度区间不合法")
+    if single_source and min_sources:
+        raise HTTPException(status_code=400, detail="单源与多源条件不能同时使用")
+    result = db.query_topics(
+        scope=scope,
+        limit=limit,
+        offset=offset,
+        since_hours=since_hours,
+        verdict=verdict,
+        include_keyword_only=include_keyword_only,
+        tiers=tier,
+        kinds=kind,
+        min_credibility=min_credibility,
+        max_credibility=max_credibility,
+        min_relevance=min_relevance,
+        max_relevance=max_relevance,
+        min_sources=min_sources,
+        single_source=single_source,
+        keywords=keyword,
+        query=q.strip() if q else None,
+        time_field=time_field,
+        sort=sort,
+        has_keyword=has_keyword,
+    )
     return {
-        "items": db.list_topics(scope, limit, offset, since_hours, verdict, include_keyword_only),
+        "items": result["items"],
+        "total": result["total"],
         "offset": offset,
         "limit": limit,
     }
